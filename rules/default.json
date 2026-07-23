@@ -1,0 +1,43 @@
+[
+  {
+    "id": "keyword-zhenggu",
+    "name": "关键词·整蛊",
+    "enabled": true,
+    "trigger": {
+      "type": "keyword",
+      "keywords": ["整蛊", "惩罚"]
+    },
+    "action": {
+      "type": "toast",
+      "message": "有人喊整蛊！准备上惩罚环节"
+    },
+    "cooldownSec": 8
+  },
+  {
+    "id": "gift-big",
+    "name": "大礼物冲击",
+    "enabled": true,
+    "trigger": {
+      "type": "gift_value",
+      "minValue": 1000
+    },
+    "action": {
+      "type": "toast",
+      "message": "大礼物！全场震动（占位）"
+    },
+    "cooldownSec": 5
+  },
+  {
+    "id": "enter-welcome",
+    "name": "进场欢迎",
+    "enabled": false,
+    "trigger": {
+      "type": "enter"
+    },
+    "action": {
+      "type": "toast",
+      "message": "欢迎新朋友进场"
+    },
+    "cooldownSec": 3
+  }
+]

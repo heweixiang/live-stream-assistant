@@ -1,0 +1,11 @@
+{
+  "name": "live-assistant-workspace",
+  "private": true,
+  "scripts": {
+    "core": "python core/server.py --mode idle",
+    "core:mock": "python core/server.py --mode mock",
+    "app": "npm --prefix app run electron:dev",
+    "pack": "npm --prefix app run pack",
+    "dev": "echo 请开两个终端：npm run core 与 npm run app"
+  }
+}

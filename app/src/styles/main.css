@@ -1,0 +1,79 @@
+:root {
+  color-scheme: dark;
+  --bg: #14110e;
+  --bg-elevated: #1c1814;
+  --bg-panel: #221c17;
+  --line: rgba(255, 214, 170, 0.12);
+  --text: #f6ebe0;
+  --muted: #b7a693;
+  --accent: #ff8a3d;
+  --accent-2: #ffc857;
+  --ok: #6fcf97;
+  --danger: #ff6b6b;
+  --gift: #ffb020;
+  --chat: #9fd3ff;
+  --enter: #b8f2c0;
+  /* 互动流配色：偏灰蓝 / 偏灰红，避免正蓝正红 */
+  --name-chat: #6ea0c4;
+  --name-gift: #d4897e;
+  --gift-label: #c97b70;
+  --enter-dim: #a89f92;
+  --enter-text: #9a9184;
+  --follow-gold: #d4b45a;
+  --like-yellow: #e6d39a;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  --radius: 14px;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+  height: 100%;
+  width: 100%;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(255, 138, 61, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(255, 200, 87, 0.12), transparent 50%),
+    linear-gradient(180deg, #1a1511 0%, #14110e 40%, #100e0c 100%);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.scroll {
+  overflow: auto;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 214, 170, 0.2);
+  border-radius: 999px;
+}
