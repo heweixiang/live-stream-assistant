@@ -10,7 +10,14 @@ export function migrateRules(raw: unknown): PrankRule[] | null {
 
   const first = raw[0] as Record<string, unknown>
   if (Array.isArray(first.actions)) {
-    return raw as PrankRule[]
+    return (raw as PrankRule[]).map((r) => ({
+      ...r,
+      enabled: r.enabled !== false,
+      actions: (r.actions || []).map((a) => ({
+        ...a,
+        enabled: a.enabled !== false,
+      })),
+    }))
   }
 
   return raw.map((item, i) => {

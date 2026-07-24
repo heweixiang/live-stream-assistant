@@ -1,7 +1,7 @@
 {
   "name": "live-assistant",
   "private": true,
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.3",
   "description": "抖音直播助手桌面端",
   "author": "直播助手",
   "main": "electron/main.cjs",
@@ -11,6 +11,7 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "electron:dev:admin": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && node scripts/electron-dev-admin.cjs\"",
     "electron:build": "npm run build && electron .",
     "pack": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win portable --x64 && node scripts/sync-desktop.cjs",
     "pack:sync": "node scripts/sync-desktop.cjs"
@@ -57,7 +58,8 @@
       ],
       "icon": "build/icon.png",
       "artifactName": "直播助手-${version}-portable.exe",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "requestedExecutionLevel": "requireAdministrator"
     },
     "portable": {
       "artifactName": "直播助手-${version}-portable.exe"

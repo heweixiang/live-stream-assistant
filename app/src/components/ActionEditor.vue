@@ -44,6 +44,9 @@ watch(
         console.warn('[ActionEditor] clone failed', e)
         Object.assign(draft, { ...toRaw(act) })
       }
+      if (draft.category === 'other' && draft.otherOp === 'toast' && !(Number(draft.toastCloseSec) > 0)) {
+        draft.toastCloseSec = 3
+      }
       if (
         open &&
         draft.category === 'other' &&
@@ -85,6 +88,10 @@ function setCategory(cat: ActionCategory) {
     if (!draft.mouseOp) draft.mouseOp = 'click_left'
     if (draft.mouseX == null || Number.isNaN(Number(draft.mouseX))) draft.mouseX = 0
     if (draft.mouseY == null || Number.isNaN(Number(draft.mouseY))) draft.mouseY = 0
+    if (draft.mouseX2 == null || Number.isNaN(Number(draft.mouseX2))) draft.mouseX2 = 400
+    if (draft.mouseY2 == null || Number.isNaN(Number(draft.mouseY2))) draft.mouseY2 = 300
+    if (draft.mouseDurationSec == null || Number.isNaN(Number(draft.mouseDurationSec))) draft.mouseDurationSec = 2
+    if (draft.mouseSpinTurns == null || Number.isNaN(Number(draft.mouseSpinTurns))) draft.mouseSpinTurns = 4
     if (draft.scrollDelta == null || Number.isNaN(Number(draft.scrollDelta))) draft.scrollDelta = -120
   }
   if (cat === 'sound' && !draft.soundMode) draft.soundMode = 'file'
@@ -127,9 +134,16 @@ async function previewSound() {
 async function testRun() {
   const api = window.liveAssistant
   const { testAction } = await import('../lib/prank/actionRunner')
-  await testAction(cloneAction(draft), {
-    dryToast: (m) => api?.notify?.('测试', m),
-  })
+  try {
+    await testAction(cloneAction(draft), {
+      dryToast: (m) => {
+        void api?.notify?.('测试', m)
+      },
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    void api?.notify?.('测试失败', msg)
+  }
 }
 
 function onConfirm() {
@@ -175,6 +189,9 @@ function pickProc(name: string) {
 
 function selectOtherOp(op: OtherOp) {
   draft.otherOp = op
+  if (op === 'toast' && !(Number(draft.toastCloseSec) > 0)) {
+    draft.toastCloseSec = 3
+  }
   if (op === 'close_process' || op === 'minimize_process') {
     void refreshProcs()
   }
@@ -260,6 +277,7 @@ function selectOtherOp(op: OtherOp) {
                 { value: 'click_right', label: '右键单击' },
                 { value: 'click_middle', label: '中键单击' },
                 { value: 'move', label: '移动到指定位置' },
+                { value: 'dizzy', label: '天旋地转（螺旋移动）' },
                 { value: 'scroll', label: '滚轮' },
               ]"
             />
@@ -272,6 +290,43 @@ function selectOtherOp(op: OtherOp) {
             </label>
             <p class="hint">滚轮不需要坐标；若要先移到某处再滚，可另加一条「移动」效果。</p>
           </template>
+
+          <template v-else-if="draft.mouseOp === 'dizzy'">
+            <div class="row2">
+              <label>
+                <span>起点 X</span>
+                <input v-model.number="draft.mouseX" type="number" step="1" />
+              </label>
+              <label>
+                <span>起点 Y</span>
+                <input v-model.number="draft.mouseY" type="number" step="1" />
+              </label>
+            </div>
+            <div class="row2">
+              <label>
+                <span>终点 X</span>
+                <input v-model.number="draft.mouseX2" type="number" step="1" />
+              </label>
+              <label>
+                <span>终点 Y</span>
+                <input v-model.number="draft.mouseY2" type="number" step="1" />
+              </label>
+            </div>
+            <div class="row2">
+              <label>
+                <span>耗时（秒）</span>
+                <input v-model.number="draft.mouseDurationSec" type="number" min="0.3" max="30" step="0.1" />
+              </label>
+              <label>
+                <span>螺旋圈数</span>
+                <input v-model.number="draft.mouseSpinTurns" type="number" min="1" max="20" step="1" />
+              </label>
+            </div>
+            <p class="hint">
+              光标会从起点螺旋晃到终点。起点填 0,0 表示从当前位置开始。圈数越大越晕。
+            </p>
+          </template>
+
           <template v-else>
             <div class="row2">
               <label>
@@ -326,7 +381,7 @@ function selectOtherOp(op: OtherOp) {
           </template>
           <template v-else>
             <p class="hint">
-              音色与密钥在「系统设置」配置（微软 Azure / 语音克隆）。此处只填要读的文案。
+              音色在「系统设置 → TTS 语音」配置。此处只填要读的文案。
             </p>
             <label>
               <span>朗读文本</span>
@@ -342,8 +397,8 @@ function selectOtherOp(op: OtherOp) {
                 <input v-model.number="draft.ttsRate" type="number" min="0.5" max="2" step="0.1" />
               </label>
               <label>
-                <span>音量 (0~1)</span>
-                <input v-model.number="draft.ttsVolume" type="number" min="0" max="1" step="0.1" />
+                <span>音量 (0~3，&gt;1 更响)</span>
+                <input v-model.number="draft.ttsVolume" type="number" min="0" max="3" step="0.1" />
               </label>
             </div>
             <button type="button" class="mini wide" @click="previewSound">试听 TTS</button>
@@ -369,6 +424,20 @@ function selectOtherOp(op: OtherOp) {
             <span>提示文案</span>
             <input v-model="draft.message" />
           </label>
+          <label v-if="draft.otherOp === 'toast'">
+            <span>关闭时间(秒)</span>
+            <input
+              v-model.number="draft.toastCloseSec"
+              type="number"
+              min="0.5"
+              max="60"
+              step="0.5"
+              placeholder="3"
+            />
+          </label>
+          <p v-if="draft.otherOp === 'toast'" class="hint">
+            弹窗显示多久后自动关闭，默认 3 秒（0.5～60）
+          </p>
 
           <div
             v-if="draft.otherOp === 'close_process' || draft.otherOp === 'minimize_process'"

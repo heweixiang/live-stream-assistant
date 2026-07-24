@@ -228,7 +228,19 @@ export async function tryAnnounceEvent(event: LiveEvent): Promise<void> {
   if (!text) return
 
   const { speakText } = await import('./speak')
-  await speakText(text, { queue: cfg.queue }).catch(() => undefined)
+  try {
+    // 直播事件默认走排队；满了静默丢，避免刷失败提示
+    await speakText(text, { queue: cfg.queue !== false })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/队列已满|已停止|abort/i.test(msg)) return
+    console.warn('[announce] speak failed', e)
+    try {
+      await window.liveAssistant?.notify?.('语音播报失败', msg)
+    } catch {
+      // ignore
+    }
+  }
 }
 
 /** 停止所有播报（含排队） */

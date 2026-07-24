@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ActionEditor from './ActionEditor.vue'
 import {
   TRIGGER_OPTIONS,
@@ -15,6 +15,7 @@ import {
 import { loadDefaultRules } from '../lib/prank/migrate'
 import { runRuleEffects, testAction } from '../lib/prank/actionRunner'
 import { giftFallbackIcon } from '../lib/douyinEmoji'
+import { usePrankMaster } from '../composables/usePrankMaster'
 
 const props = defineProps<{
   /** 全量/本场礼物目录，供触发条件点选（名称精确匹配） */
@@ -33,8 +34,29 @@ const emit = defineEmits<{
   toast: [string]
 }>()
 
+const { prankMasterEnabled } = usePrankMaster()
+
 const selectedId = ref(rules.value[0]?.id || '')
 const editorOpen = ref(false)
+/** 规则测试倒计时剩余秒数；>0 表示倒计时中 */
+const testCountdown = ref(0)
+let testCountdownTimer: ReturnType<typeof setInterval> | null = null
+let testCountdownResolve: ((ok: boolean) => void) | null = null
+
+function clearTestCountdown(cancelled = true) {
+  if (testCountdownTimer) {
+    clearInterval(testCountdownTimer)
+    testCountdownTimer = null
+  }
+  testCountdown.value = 0
+  if (cancelled && testCountdownResolve) {
+    const resolve = testCountdownResolve
+    testCountdownResolve = null
+    resolve(false)
+  }
+}
+
+onBeforeUnmount(() => clearTestCountdown())
 const editingAction = ref<RuleAction | null>(null)
 const editingIndex = ref(-1)
 
@@ -105,6 +127,7 @@ function giftIconOf(name: string, icon?: string) {
 }
 
 function select(id: string) {
+  if (id !== selectedId.value) clearTestCountdown()
   selectedId.value = id
 }
 
@@ -122,13 +145,43 @@ function removeRule(id: string) {
   if (selectedId.value === id) selectedId.value = next[Math.max(0, idx - 1)]?.id || ''
 }
 
-function moveRule(id: string, dir: -1 | 1) {
-  const i = rules.value.findIndex((r) => r.id === id)
-  const j = i + dir
-  if (i < 0 || j < 0 || j >= rules.value.length) return
+/** 拖拽排序 */
+const dragFrom = ref(-1)
+const dragOver = ref(-1)
+
+function onDragStart(index: number, e: DragEvent) {
+  dragFrom.value = index
+  dragOver.value = index
+  e.dataTransfer?.setData('text/plain', String(index))
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onDragOver(index: number, e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dragOver.value = index
+}
+
+function onDrop(index: number) {
+  const from = dragFrom.value
+  if (from < 0 || from === index) {
+    onDragEnd()
+    return
+  }
   const next = [...rules.value]
-  ;[next[i], next[j]] = [next[j], next[i]]
+  const [item] = next.splice(from, 1)
+  next.splice(index, 0, item)
   rules.value = next
+  onDragEnd()
+}
+
+function onDragEnd() {
+  dragFrom.value = -1
+  dragOver.value = -1
+}
+
+function toggleEnabled(rule: PrankRule, checked: boolean) {
+  rule.enabled = checked
 }
 
 function restoreDefaults() {
@@ -172,8 +225,13 @@ function saveEffect(action: RuleAction) {
   const rule = current.value
   if (!rule) return
   const list = [...(rule.actions || [])]
-  if (editingIndex.value >= 0) list[editingIndex.value] = action
-  else list.push({ ...action, id: action.id || newActionId() })
+  const normalized = {
+    ...action,
+    id: action.id || newActionId(),
+    enabled: action.enabled !== false,
+  }
+  if (editingIndex.value >= 0) list[editingIndex.value] = normalized
+  else list.push(normalized)
   const idx = rules.value.findIndex((r) => r.id === rule.id)
   if (idx < 0) return
   const next = [...rules.value]
@@ -186,19 +244,76 @@ function removeEffect(i: number) {
   current.value.actions = current.value.actions.filter((_, idx) => idx !== i)
 }
 
-function moveEffect(i: number, dir: -1 | 1) {
-  if (!current.value) return
-  const j = i + dir
+/** 效果列表拖拽 */
+const effectDragFrom = ref(-1)
+const effectDragOver = ref(-1)
+
+function onEffectDragStart(index: number, e: DragEvent) {
+  effectDragFrom.value = index
+  effectDragOver.value = index
+  e.dataTransfer?.setData('text/plain', String(index))
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onEffectDragOver(index: number, e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  effectDragOver.value = index
+}
+
+function onEffectDrop(index: number) {
+  const from = effectDragFrom.value
+  if (!current.value || from < 0 || from === index) {
+    onEffectDragEnd()
+    return
+  }
   const list = [...current.value.actions]
-  if (j < 0 || j >= list.length) return
-  ;[list[i], list[j]] = [list[j], list[i]]
+  const [item] = list.splice(from, 1)
+  list.splice(index, 0, item)
   current.value.actions = list
+  onEffectDragEnd()
+}
+
+function onEffectDragEnd() {
+  effectDragFrom.value = -1
+  effectDragOver.value = -1
+}
+
+function toggleActionEnabled(action: RuleAction, checked: boolean) {
+  action.enabled = checked
 }
 
 async function testRule() {
   if (!current.value) return
-  emit('toast', `测试：${current.value.name}`)
-  await runRuleEffects(current.value, 1, 0, {
+  if (testCountdown.value > 0) return
+
+  clearTestCountdown()
+  const rule = current.value
+  testCountdown.value = 5
+  emit('toast', `测试将在 5 秒后触发：${rule.name}`)
+
+  const ok = await new Promise<boolean>((resolve) => {
+    testCountdownResolve = resolve
+    testCountdownTimer = setInterval(() => {
+      testCountdown.value -= 1
+      if (testCountdown.value <= 0) {
+        if (testCountdownTimer) {
+          clearInterval(testCountdownTimer)
+          testCountdownTimer = null
+        }
+        testCountdown.value = 0
+        const done = testCountdownResolve
+        testCountdownResolve = null
+        done?.(true)
+      } else {
+        emit('toast', `测试倒计时 ${testCountdown.value} 秒…`)
+      }
+    }, 1000)
+  })
+
+  if (!ok) return
+  emit('toast', `测试触发：${rule.name}`)
+  await runRuleEffects(rule, 1, 0, {
     dryToast: (m) => emit('toast', m),
   })
 }
@@ -233,6 +348,10 @@ function categoryLabel(cat: string) {
     <header class="toolbar">
       <div class="tabs">
         <span class="on">玩法列表</span>
+        <label class="master" :class="{ off: !prankMasterEnabled }" title="关闭后所有玩法都不会被直播事件触发（测试按钮仍可用）">
+          <input v-model="prankMasterEnabled" type="checkbox" />
+          <span>开启整蛊</span>
+        </label>
       </div>
       <div class="ops">
         <button type="button" @click="restoreDefaults">恢复默认</button>
@@ -245,13 +364,33 @@ function categoryLabel(cat: string) {
           v-for="(r, i) in rules"
           :key="r.id"
           class="item"
-          :class="{ on: r.id === selectedId, off: !r.enabled }"
+          :class="{
+            on: r.id === selectedId,
+            off: !r.enabled,
+            dragging: dragFrom === i,
+            'drag-over': dragOver === i && dragFrom !== i,
+          }"
+          @dragover="onDragOver(i, $event)"
+          @drop="onDrop(i)"
           @click="select(r.id)"
         >
+          <label class="en" title="勾选后才会被直播事件触发" @click.stop>
+            <input
+              type="checkbox"
+              :checked="r.enabled"
+              @change="toggleEnabled(r, ($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <span
+            class="grip"
+            title="拖动排序"
+            draggable="true"
+            @dragstart="onDragStart(i, $event)"
+            @dragend="onDragEnd"
+            @click.stop
+          >⠿</span>
           <span class="name">{{ r.name || `玩法${i + 1}` }}</span>
           <span class="row-ops" @click.stop>
-            <button type="button" title="上移" @click="moveRule(r.id, -1)">↑</button>
-            <button type="button" title="下移" @click="moveRule(r.id, 1)">↓</button>
             <button type="button" title="删除" @click="removeRule(r.id)">×</button>
           </span>
         </div>
@@ -264,15 +403,20 @@ function categoryLabel(cat: string) {
             <span>名称</span>
             <input v-model="current.name" />
           </label>
-          <label class="hotkey">
-            <span>快捷键</span>
-            <input v-model="current.hotkey" placeholder="可选" />
-          </label>
-          <label class="switch">
-            <input v-model="current.enabled" type="checkbox" />
-            <span>启用</span>
-          </label>
-          <button type="button" class="primary" @click="testRule">测试</button>
+          <div class="test-wrap">
+            <div v-if="testCountdown > 0" class="test-cd" aria-live="polite">
+              <strong>{{ testCountdown }}</strong>
+              <span>秒后触发</span>
+            </div>
+            <button
+              type="button"
+              class="primary"
+              :disabled="testCountdown > 0"
+              @click="testRule"
+            >
+              {{ testCountdown > 0 ? `倒计时 ${testCountdown}` : '测试' }}
+            </button>
+          </div>
         </div>
 
         <fieldset class="box">
@@ -359,7 +503,7 @@ function categoryLabel(cat: string) {
                 </p>
               </div>
             </div>
-            <label class="sm">
+            <label class="field-count">
               <span>数量 ≥</span>
               <input v-model.number="current.trigger.giftCount" type="number" min="1" />
             </label>
@@ -386,20 +530,20 @@ function categoryLabel(cat: string) {
             </label>
           </div>
 
-          <div class="params row checks">
-            <label class="check">
+          <div class="params extras">
+            <label class="check full">
               <input v-model="current.trigger.multiByGiftCount" type="checkbox" />
               根据礼物数量触发多次
             </label>
-            <label class="sm">
+            <label class="field">
               <span>间隔(秒)</span>
               <input v-model.number="current.trigger.multiIntervalSec" type="number" min="0" step="0.1" />
             </label>
-            <label class="sm">
+            <label class="field">
               <span>同用户冷却(秒)</span>
               <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
             </label>
-            <label class="sm">
+            <label class="field">
               <span>规则冷却(秒)</span>
               <input v-model.number="current.cooldownSec" type="number" min="0" />
             </label>
@@ -423,28 +567,44 @@ function categoryLabel(cat: string) {
             </label>
           </div>
 
-          <table class="effects">
-            <thead>
-              <tr>
-                <th>类型</th>
-                <th>行为</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(a, i) in current.actions" :key="a.id">
-                <td>{{ categoryLabel(a.category) }}</td>
-                <td>{{ actionSummary(a) }}</td>
-                <td class="acts">
-                  <button type="button" @click="moveEffect(i, -1)">↑</button>
-                  <button type="button" @click="moveEffect(i, 1)">↓</button>
-                  <button type="button" @click="testOne(a)">测</button>
-                  <button type="button" @click="editEffect(i)">改</button>
-                  <button type="button" @click="removeEffect(i)">删</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="effect-list">
+            <div
+              v-for="(a, i) in current.actions"
+              :key="a.id"
+              class="effect-row"
+              :class="{
+                off: a.enabled === false,
+                dragging: effectDragFrom === i,
+                'drag-over': effectDragOver === i && effectDragFrom !== i,
+              }"
+              @dragover="onEffectDragOver(i, $event)"
+              @drop="onEffectDrop(i)"
+            >
+              <label class="en" title="勾选后才会执行该效果" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="a.enabled !== false"
+                  @change="toggleActionEnabled(a, ($event.target as HTMLInputElement).checked)"
+                />
+              </label>
+              <span
+                class="grip"
+                title="拖动排序"
+                draggable="true"
+                @dragstart="onEffectDragStart(i, $event)"
+                @dragend="onEffectDragEnd"
+                @click.stop
+              >⠿</span>
+              <span class="effect-cat">{{ categoryLabel(a.category) }}</span>
+              <span class="effect-sum">{{ actionSummary(a) }}</span>
+              <span class="row-ops" @click.stop>
+                <button type="button" @click="testOne(a)">测</button>
+                <button type="button" @click="editEffect(i)">改</button>
+                <button type="button" @click="removeEffect(i)">删</button>
+              </span>
+            </div>
+            <p v-if="!current.actions.length" class="hint-inline">还没有效果，点下方添加</p>
+          </div>
           <button type="button" class="add-effect" @click="addEffect">添加效果</button>
         </fieldset>
       </div>
@@ -476,9 +636,37 @@ function categoryLabel(cat: string) {
   border-bottom: 1px solid var(--line);
 }
 
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
 .tabs .on {
   font-size: 14px;
   font-weight: 600;
+}
+
+.master {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+
+.master input {
+  width: 14px;
+  height: 14px;
+  accent-color: #ff8a3d;
+  cursor: pointer;
+}
+
+.master.off {
+  color: var(--muted);
 }
 
 .ops button {
@@ -515,6 +703,7 @@ function categoryLabel(cat: string) {
   cursor: pointer;
   color: var(--text);
   font-size: 13px;
+  border: 1px solid transparent;
 }
 
 .item:hover {
@@ -527,6 +716,44 @@ function categoryLabel(cat: string) {
 
 .item.off .name {
   opacity: 0.45;
+}
+
+.item.dragging {
+  opacity: 0.45;
+}
+
+.item.drag-over {
+  border-color: rgba(255, 138, 61, 0.55);
+  background: rgba(255, 138, 61, 0.1);
+}
+
+.en {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.en input {
+  width: 14px;
+  height: 14px;
+  accent-color: #ff8a3d;
+  cursor: pointer;
+}
+
+.grip {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+  flex-shrink: 0;
+  letter-spacing: -2px;
+  cursor: grab;
+  padding: 2px 1px;
+}
+
+.grip:active {
+  cursor: grabbing;
 }
 
 .name {
@@ -579,6 +806,46 @@ function categoryLabel(cat: string) {
   flex-wrap: wrap;
 }
 
+.test-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 88px;
+}
+
+.test-cd {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 138, 61, 0.18);
+  border: 1px solid rgba(255, 138, 61, 0.55);
+  color: var(--accent-2);
+  font-size: 12px;
+  line-height: 1.2;
+  animation: cd-pulse 1s ease-in-out infinite;
+}
+
+.test-cd strong {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes cd-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.85;
+  }
+}
+
 .line label {
   display: grid;
   gap: 4px;
@@ -620,6 +887,12 @@ function categoryLabel(cat: string) {
   color: #1a120c;
   font-weight: 600;
   height: 36px;
+  cursor: pointer;
+}
+
+.primary:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .box {
@@ -670,20 +943,53 @@ function categoryLabel(cat: string) {
   gap: 8px;
 }
 
-.params.row,
-.params.row.checks,
 .params.gift-params {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: flex-end;
-}
-
-.params.gift-params {
+  flex-direction: column;
   align-items: stretch;
 }
 
+.field-count {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 200px;
+}
+
+.field-count input,
+.field input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.params.extras {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+
+.params.extras .check.full {
+  grid-column: 1 / -1;
+}
+
+.params.extras .field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+
 .gift-picker {
-  flex: 1 1 280px;
+  width: 100%;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -823,16 +1129,14 @@ function categoryLabel(cat: string) {
   gap: 4px;
   font-size: 12px;
   color: var(--muted);
-  flex: 1;
-  min-width: 140px;
-}
-
-.params .sm {
-  flex: 0 0 120px;
+  min-width: 0;
 }
 
 .params input,
 .params select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
@@ -864,32 +1168,60 @@ function categoryLabel(cat: string) {
   min-width: auto !important;
   flex: 0 0 auto !important;
   color: var(--text) !important;
-  padding-bottom: 6px;
+  padding-bottom: 0;
 }
 
-.effects {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+.effect-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-bottom: 10px;
 }
 
-.effects th,
-.effects td {
-  text-align: left;
-  padding: 8px 6px;
-  border-bottom: 1px solid var(--line);
+.effect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
 }
 
-.effects th {
+.effect-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.effect-row.off .effect-sum,
+.effect-row.off .effect-cat {
+  opacity: 0.45;
+}
+
+.effect-row.dragging {
+  opacity: 0.45;
+}
+
+.effect-row.drag-over {
+  border-color: rgba(255, 138, 61, 0.55);
+  background: rgba(255, 138, 61, 0.1);
+}
+
+.effect-cat {
+  flex: 0 0 auto;
   color: var(--muted);
-  font-weight: 500;
   font-size: 12px;
+  min-width: 4.5em;
 }
 
-.acts {
+.effect-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right !important;
+  font-size: 13px;
+  color: var(--text);
 }
 
 .empty {

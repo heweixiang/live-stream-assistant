@@ -38,6 +38,7 @@ import { tryAnnounceEvent } from './lib/tts/announce'
 import { clearLikeBucket, ingestLike, setLikeSettleHandler } from './lib/likeBatch'
 import { stopSpeak } from './lib/tts/speak'
 import { reloadPanelFontsFromStorage, usePanelFonts } from './composables/usePanelFonts'
+import { reloadPrankMasterFromStorage, usePrankMaster } from './composables/usePrankMaster'
 
 const RECONNECT_MS = 60_000
 
@@ -78,10 +79,14 @@ const giftCatalog = ref<GiftCatalogItem[]>(loadGiftCatalog())
 /** 抖音全量礼物静态目录（名+图标），规则页点选用 */
 const staticGifts = ref<StaticGift[]>([])
 const { fonts: panelFonts } = usePanelFonts()
+const { prankMasterEnabled } = usePrankMaster()
 /** 有直播号则默认要连；手动点断开后本会话内暂停自动重连 */
 const wantConnect = ref(!!liveId.value.trim())
 const connectHint = ref('')
 const hasTriedConnect = ref(wantConnect.value)
+/** 是否管理员；null=检测中 */
+const isAdmin = ref<boolean | null>(null)
+const adminBannerDismissed = ref(false)
 
 const gifts = computed(() => events.value.filter((e) => e.type === 'gift'))
 const enters = computed(() => events.value.filter((e) => e.type === 'enter'))
@@ -125,12 +130,17 @@ const giftOptions = computed(() => {
 onMounted(() => {
   setLikeSettleHandler((merged) => {
     void tryAnnounceEvent(merged)
+    if (!prankMasterEnabled.value) return
     const hits = matchRules(merged, rules.value)
     if (!hits.length) return
     firedActions.value = [...firedActions.value, ...hits.map((h) => h.fired)].slice(-50)
     for (const hit of hits) {
-      void runRuleEffects(hit.rule, hit.times, hit.intervalSec).catch((err) => {
-        connectHint.value = `玩法执行失败：${err instanceof Error ? err.message : String(err)}`
+      void runRuleEffects(hit.rule, hit.times, hit.intervalSec, {
+        dryToast: (m) => onRuleToast(m),
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        connectHint.value = `玩法执行失败：${msg}`
+        onRuleToast(msg)
       })
     }
   })
@@ -150,12 +160,34 @@ onMounted(() => {
     layout.value = loadLayout()
     giftCatalog.value = loadGiftCatalog()
     reloadPanelFontsFromStorage()
+    reloadPrankMasterFromStorage()
     if (boot.ok) await flushNowToDisk()
     const list = await loadStaticGifts()
     staticGifts.value = list
+    // 管理员权限检测（顶栏常驻提醒）
+    try {
+      if (window.liveAssistant?.isAdmin) {
+        isAdmin.value = await window.liveAssistant.isAdmin()
+      } else {
+        isAdmin.value = true
+      }
+    } catch {
+      isAdmin.value = true
+    }
   })()
 })
 
+async function onRelaunchAsAdmin() {
+  try {
+    await window.liveAssistant?.relaunchAsAdmin?.()
+  } catch (e) {
+    connectHint.value = e instanceof Error ? e.message : '提权启动失败'
+  }
+}
+
+function dismissAdminBanner() {
+  adminBannerDismissed.value = true
+}
 function flushDiskOnLeave() {
   void import('./lib/diskSync').then((m) => m.flushNowToDisk())
 }
@@ -323,6 +355,8 @@ watch(
     // 语音播报（与整蛊规则独立）
     void tryAnnounceEvent(event)
 
+    if (!prankMasterEnabled.value) return
+
     const hits = matchRules(event, rules.value)
     if (!hits.length) return
 
@@ -330,20 +364,25 @@ watch(
 
     // 异步执行效果，不阻塞后续事件匹配（不再弹窗，日志区高亮）
     for (const hit of hits) {
-      void runRuleEffects(hit.rule, hit.times, hit.intervalSec).catch((err) => {
-        connectHint.value = `玩法执行失败：${err instanceof Error ? err.message : String(err)}`
+      void runRuleEffects(hit.rule, hit.times, hit.intervalSec, {
+        dryToast: (m) => onRuleToast(m),
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        connectHint.value = `玩法执行失败：${msg}`
+        onRuleToast(msg)
       })
     }
   },
 )
 
-function onRuleToast(msg: string) {
+function onRuleToast(msg: string, meta?: { durationMs?: number }) {
   toast.value = {
     id: `toast-${Date.now()}`,
     ruleId: '',
     ruleName: '测试',
     message: msg,
     at: Date.now(),
+    durationMs: meta?.durationMs,
   }
 }
 
@@ -516,6 +555,18 @@ async function onExportConfig() {
       </div>
     </header>
 
+    <div
+      v-if="isAdmin === false && !adminBannerDismissed"
+      class="admin-banner"
+      role="status"
+    >
+      <span>当前不是管理员权限，关闭进程 / 部分整蛊可能失败。</span>
+      <div class="admin-acts">
+        <button type="button" class="admin-go" @click="onRelaunchAsAdmin">以管理员重新启动</button>
+        <button type="button" class="admin-later" @click="dismissAdminBanner">稍后</button>
+      </div>
+    </div>
+
     <div v-if="page === 'live' && showCookie" class="cookie-box">
       <textarea
         v-model="cookie"
@@ -590,6 +641,45 @@ async function onExportConfig() {
   flex-direction: column;
   gap: 14px;
   padding: 18px 20px 20px;
+}
+
+.admin-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 180, 60, 0.55);
+  background: rgba(255, 138, 61, 0.16);
+  color: #ffd7a8;
+  font-size: 13px;
+}
+
+.admin-acts {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.admin-go {
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: linear-gradient(135deg, var(--accent), #ffb15a);
+  color: #1a120c;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-later {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
 }
 
 .top {

@@ -15,15 +15,11 @@ declare global {
       }) => Promise<string | null>
       mediaAsDataUrl: (filePath: string) => Promise<string>
       ttsSpeak: (opts: {
+        provider?: 'melo' | 'system'
         text: string
-        key: string
-        region: string
-        voice?: string
+        meloUrl?: string
         rate?: number
         volume?: number
-        useClone?: boolean
-        speakerProfileId?: string
-        personalVoiceName?: string
       }) => Promise<{ ok: boolean; dataUrl?: string; error?: string; bytes?: number }>
       saveVoiceSample: (payload: {
         name?: string
@@ -34,6 +30,11 @@ declare global {
       listVoiceSamples: () => Promise<VoiceSampleMeta[]>
       deleteVoiceSample: (id: string) => Promise<boolean>
       readVoiceSample: (id: string) => Promise<string>
+      /** 主进程本机播放 dataUrl */
+      playAudioDataUrl: (
+        dataUrl: string,
+        volume?: number,
+      ) => Promise<{ ok: boolean; error?: string }>
       getDataRoot: () => Promise<string>
       loadDiskSettings: () => Promise<Record<string, unknown>>
       saveDiskSettings: (patch: Record<string, unknown>) => Promise<Record<string, unknown>>
@@ -63,6 +64,10 @@ declare global {
       }>
       douyinLogout: () => Promise<boolean>
       douyinAuthStatus: () => Promise<{ cookie: string; loggedIn: boolean }>
+      /** 是否管理员权限 */
+      isAdmin: () => Promise<boolean>
+      /** 以管理员重新启动 */
+      relaunchAsAdmin: () => Promise<{ ok: boolean; already?: boolean }>
       platform: string
     }
   }

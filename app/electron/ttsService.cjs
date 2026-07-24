@@ -75,6 +75,45 @@ async function azureSpeak(opts) {
   }
 }
 
+/**
+ * 内置 MeloTTS（本地 HTTP 服务，默认 127.0.0.1:8766）
+ * @param {{ text: string, rate?: number, meloUrl?: string }} opts
+ */
+async function meloSpeak(opts) {
+  const text = String(opts.text || '').trim()
+  if (!text) throw new Error('朗读文本为空')
+  const base = String(opts.meloUrl || 'http://127.0.0.1:8766').replace(/\/$/, '')
+  const speed = Math.min(2, Math.max(0.5, Number(opts.rate) || 1))
+  let res
+  try {
+    res = await fetch(`${base}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, speed }),
+    })
+  } catch (e) {
+    throw new Error(
+      `无法连接内置 MeloTTS（${base}）。请先运行：npm run tts\n${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || !data?.ok || !data?.dataUrl) {
+    throw new Error(data?.error || `MeloTTS 失败 HTTP ${res.status}`)
+  }
+  return { ok: true, dataUrl: data.dataUrl, bytes: data.bytes || 0 }
+}
+
+/**
+ * 统一入口：按 provider 分发
+ * @param {{ provider?: string, text: string, meloUrl?: string, key?: string, region?: string, voice?: string, rate?: number, volume?: number, useClone?: boolean, speakerProfileId?: string, personalVoiceName?: string }} opts
+ */
+async function speak(opts) {
+  const provider = String(opts?.provider || 'melo')
+  if (provider === 'melo') return meloSpeak(opts || {})
+  if (provider === 'azure') return azureSpeak(opts || {})
+  throw new Error(`不支持的 TTS 引擎：${provider}`)
+}
+
 function clonesDir() {
   const dir = dataClonesDir()
   fs.mkdirSync(dir, { recursive: true })
@@ -162,8 +201,131 @@ function readVoiceSampleDataUrl(id) {
   return `data:${mime};base64,${buf.toString('base64')}`
 }
 
+/**
+ * 对 PCM WAV 做增益（0~3）。SoundPlayer 无法调音量，>1 可把 Melo 合成声抬高。
+ * @param {Buffer} buf
+ * @param {number} gain
+ */
+function applyWavGain(buf, gain) {
+  const g = Number(gain)
+  if (!Buffer.isBuffer(buf) || buf.length < 44) return buf
+  if (!Number.isFinite(g) || Math.abs(g - 1) < 0.001) return buf
+  const out = Buffer.from(buf)
+  let offset = 12
+  while (offset + 8 <= out.length) {
+    const id = out.toString('ascii', offset, offset + 4)
+    const size = out.readUInt32LE(offset + 4)
+    const dataStart = offset + 8
+    if (id === 'data') {
+      const bits = out.readUInt16LE(34)
+      const end = Math.min(dataStart + size, out.length)
+      if (bits === 16) {
+        for (let i = dataStart; i + 1 < end; i += 2) {
+          let s = out.readInt16LE(i)
+          s = Math.max(-32768, Math.min(32767, Math.round(s * g)))
+          out.writeInt16LE(s, i)
+        }
+      } else if (bits === 8) {
+        for (let i = dataStart; i < end; i++) {
+          let s = (out[i] - 128) * g
+          out[i] = Math.max(0, Math.min(255, Math.round(s + 128)))
+        }
+      }
+      return out
+    }
+    offset = dataStart + size + (size % 2)
+  }
+  return buf
+}
+
+/**
+ * 主进程本机播放（绕过 Chromium Audio，避免无声）
+ * volume 支持 0~3：≤1 为常规音量，>1 对 wav 做增益放大（相对系统音量可更响）
+ * @param {string} dataUrl
+ * @param {number} [volume]
+ */
+async function playDataUrlNative(dataUrl, volume = 1) {
+  const os = require('os')
+  const { execFile } = require('child_process')
+  const raw = String(dataUrl || '')
+  const m = raw.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/i)
+  if (!m?.[2]) throw new Error('无效音频数据')
+  const mime = (m[1] || 'audio/wav').toLowerCase()
+  const ext = mime.includes('mpeg') || mime.includes('mp3')
+    ? 'mp3'
+    : mime.includes('mp4') || mime.includes('m4a')
+      ? 'm4a'
+      : mime.includes('wav')
+        ? 'wav'
+        : mime.includes('webm')
+          ? 'webm'
+          : 'bin'
+  const tmp = path.join(
+    os.tmpdir(),
+    `live-assistant-tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`,
+  )
+  let audioBuf = Buffer.from(m[2], 'base64')
+  const gain = Math.min(3, Math.max(0, Number(volume) || 1))
+  if (ext === 'wav') {
+    audioBuf = applyWavGain(audioBuf, gain)
+  }
+  fs.writeFileSync(tmp, audioBuf)
+  // MediaPlayer 音量仅 0~1；wav 已用增益处理，这里固定 1
+  const playerVol = ext === 'wav' ? 1 : Math.min(1, gain)
+  const tmpPs = tmp.replace(/'/g, "''")
+
+  // wav：SoundPlayer 最稳（音量靠上面的增益）；其它：WPF MediaPlayer
+  const ps =
+    ext === 'wav'
+      ? `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$p = New-Object System.Media.SoundPlayer -ArgumentList '${tmpPs}'
+$p.PlaySync()
+`
+      : `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationCore
+$p = New-Object System.Windows.Media.MediaPlayer
+$p.Volume = ${playerVol}
+$p.Open([Uri]::new('${tmpPs.replace(/\\/g, '/')}'))
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not $p.NaturalDuration.HasTimeSpan) {
+  Start-Sleep -Milliseconds 40
+  if ($sw.Elapsed.TotalSeconds -gt 10) { throw '音频打开超时' }
+}
+$p.Play()
+Start-Sleep -Milliseconds ([Math]::Max(200, [int](($p.NaturalDuration.TimeSpan.TotalSeconds + 0.2) * 1000)))
+$p.Close()
+`
+
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+        { windowsHide: true, timeout: 180000 },
+        (err, _stdout, stderr) => {
+          if (err) reject(new Error(String(stderr || err.message || err)))
+          else resolve()
+        },
+      )
+    })
+    return { ok: true }
+  } finally {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      // ignore
+    }
+  }
+}
+
 module.exports = {
   azureSpeak,
+  meloSpeak,
+  speak,
+  playDataUrlNative,
   saveVoiceSample,
   listVoiceSamples,
   deleteVoiceSample,

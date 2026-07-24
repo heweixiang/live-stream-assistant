@@ -186,6 +186,28 @@ export function saveRules(rules: PrankRule[]) {
   }
 }
 
+const PRANK_MASTER_KEY = 'live-assistant.prankMasterEnabled'
+
+/** 全局整蛊总开关；缺省开启 */
+export function loadPrankMasterEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(PRANK_MASTER_KEY)
+    if (raw === null) return true
+    return raw === '1' || raw === 'true'
+  } catch {
+    return true
+  }
+}
+
+export function savePrankMasterEnabled(on: boolean) {
+  try {
+    localStorage.setItem(PRANK_MASTER_KEY, on ? '1' : '0')
+    void import('./diskSync').then((m) => m.scheduleFlushToDisk())
+  } catch {
+    // ignore
+  }
+}
+
 const GIFT_CATALOG_KEY = 'live-assistant.giftCatalog'
 
 export type GiftCatalogItem = {
@@ -317,6 +339,7 @@ export type AppConfigExport = {
   wantConnect: boolean
   cookie: string
   rules: PrankRule[]
+  prankMasterEnabled: boolean
   layout: LiveLayout
   giftCatalog: GiftCatalogItem[]
   panelFonts: PanelFonts
@@ -332,6 +355,7 @@ export function buildAppConfigExport(): AppConfigExport {
     wantConnect: loadWantConnect(),
     cookie: loadCookie(),
     rules: loadRules(),
+    prankMasterEnabled: loadPrankMasterEnabled(),
     layout: loadLayout(),
     giftCatalog: loadGiftCatalog(),
     panelFonts: loadPanelFonts(),

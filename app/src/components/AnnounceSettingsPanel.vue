@@ -110,6 +110,10 @@ function resetTemplate(kind: AnnounceKind) {
 async function testPreview() {
   testing.value = true
   try {
+    // 试听时临时视为已开启，避免用户忘开总开关以为坏了
+    if (!form.enabled) {
+      form.enabled = true
+    }
     persist()
     const text = previewText.value
     if (!text) {
@@ -137,14 +141,16 @@ function onStopSpeak() {
   <div class="announce">
     <fieldset class="box">
       <legend>总开关</legend>
-      <label class="check">
-        <input v-model="form.enabled" type="checkbox" @change="persist" />
-        开启语音播报
-      </label>
-      <label class="check">
-        <input v-model="form.queue" type="checkbox" @change="persist" />
-        排队播报（最多约 4 条，多了会丢弃，避免一直念）
-      </label>
+      <div class="checks-row">
+        <label class="check">
+          <input v-model="form.enabled" type="checkbox" @change="persist" />
+          开启语音播报
+        </label>
+        <label class="check">
+          <input v-model="form.queue" type="checkbox" @change="persist" />
+          排队播报（最多约 12 条，多了自动丢掉，不会报失败）
+        </label>
+      </div>
       <div class="acts left">
         <button type="button" class="danger" @click="onStopSpeak">停止播报</button>
       </div>
@@ -181,7 +187,7 @@ function onStopSpeak() {
 
       <!-- 点赞：按秒聚合 -->
       <div v-if="activeKind === 'like'" class="agg">
-        <label>
+        <label class="agg-sec">
           <span>点赞聚合秒数</span>
           <input
             v-model.number="form.likeMergeSec"
@@ -193,7 +199,7 @@ function onStopSpeak() {
           />
         </label>
         <p class="tip strong">
-          含义：每 【{{ form.likeMergeSec || 4 }}】 秒把这段时间内的点赞按用户合并数量，再播报一次。  
+          含义：每 【{{ form.likeMergeSec || 4 }}】 秒把这段时间内的点赞按用户合并数量，再播报一次。
           例：设 5 秒，小明在 5 秒内点了 30 下 → 到点播「感谢小明点了 30 个赞」。
         </p>
       </div>
@@ -260,7 +266,10 @@ function onStopSpeak() {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 720px;
+  width: 150%;
+  max-width: 150%;
+  min-width: 420px;
+  box-sizing: border-box;
 }
 
 .box {
@@ -279,12 +288,21 @@ function onStopSpeak() {
   font-size: 12px;
 }
 
-.check {
+.checks-row {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 20px;
+}
+
+.check {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   color: var(--text);
   font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tip {
@@ -440,12 +458,45 @@ textarea:focus {
 
 .agg {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 14px;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid rgba(255, 138, 61, 0.35);
   background: rgba(255, 138, 61, 0.08);
+}
+
+.agg-sec {
+  display: inline-flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agg-sec input {
+  width: 64px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.agg .tip.strong {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .tip.strong {

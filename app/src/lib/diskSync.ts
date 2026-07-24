@@ -15,6 +15,7 @@ const KEYS = {
   wantConnect: 'live-assistant.wantConnect',
   cookie: 'live-assistant.douyinCookie',
   rules: 'live-assistant.prankRules',
+  prankMaster: 'live-assistant.prankMasterEnabled',
   layout: 'live-assistant.layout',
   giftCatalog: 'live-assistant.giftCatalog',
   panelFonts: 'live-assistant.panelFonts',
@@ -43,6 +44,8 @@ export type DiskSettings = {
   wantConnect?: boolean
   cookie?: string
   rules?: PrankRule[]
+  /** 全局整蛊总开关，默认 true */
+  prankMasterEnabled?: boolean
   layout?: LiveLayout
   giftCatalog?: GiftCatalogItem[]
   panelFonts?: PanelFonts
@@ -91,6 +94,9 @@ export async function bootstrapFromDisk(): Promise<{ ok: boolean; root?: string 
       if (typeof disk.cookie === 'string') setRaw(KEYS.cookie, disk.cookie)
       // 玩法规则：有数组就灌入（含用户清空后的 []）
       if (Array.isArray(disk.rules)) setRaw(KEYS.rules, JSON.stringify(disk.rules))
+      if (typeof disk.prankMasterEnabled === 'boolean') {
+        setRaw(KEYS.prankMaster, disk.prankMasterEnabled ? '1' : '0')
+      }
       if (disk.layout) setRaw(KEYS.layout, JSON.stringify(disk.layout))
       if (disk.giftCatalog) setRaw(KEYS.giftCatalog, JSON.stringify(disk.giftCatalog))
       if (disk.panelFonts) setRaw(KEYS.panelFonts, JSON.stringify(disk.panelFonts))
@@ -121,6 +127,11 @@ export async function flushAllToDisk(): Promise<void> {
     wantConnect: localStorage.getItem(KEYS.wantConnect) === '1',
     cookie: localStorage.getItem(KEYS.cookie) || '',
     rules: readJson<PrankRule[]>(KEYS.rules, []),
+    // 缺省视为开启
+    prankMasterEnabled:
+      localStorage.getItem(KEYS.prankMaster) === null
+        ? true
+        : localStorage.getItem(KEYS.prankMaster) === '1',
     layout: readJson(KEYS.layout, FALLBACK_LAYOUT),
     giftCatalog: readJson(KEYS.giftCatalog, []),
     panelFonts: readJson(KEYS.panelFonts, FALLBACK_FONTS),

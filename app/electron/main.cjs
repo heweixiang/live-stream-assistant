@@ -8,7 +8,8 @@ const {
   peekDouyinCookie,
 } = require('./douyinAuth.cjs')
 const {
-  azureSpeak,
+  speak: ttsSpeak,
+  playDataUrlNative,
   saveVoiceSample,
   listVoiceSamples,
   deleteVoiceSample,
@@ -24,9 +25,12 @@ const {
   openDataFolder,
   migrateLegacyClones,
 } = require('./dataStore.cjs')
+const { isRunningAsAdmin, relaunchAsAdmin } = require('./admin.cjs')
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null
+/** 本会话是否已提示过非管理员 */
+let adminPrompted = false
 
 const iconPath = path.join(__dirname, '../build/icon.png')
 
@@ -61,7 +65,10 @@ function createWindow() {
   })
 }
 
-app.whenReady().then(() => {
+// 直播事件播报无需用户手势也可出声
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
+app.whenReady().then(async () => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.liveassistant.desktop')
   }
@@ -69,6 +76,36 @@ app.whenReady().then(() => {
   ensureDataRoot()
   migrateLegacyClones()
   createWindow()
+
+  ipcMain.handle('app:isAdmin', async () => isRunningAsAdmin())
+  ipcMain.handle('app:relaunchAsAdmin', async () => {
+    const ok = await isRunningAsAdmin()
+    if (ok) return { ok: true, already: true }
+    relaunchAsAdmin()
+    return { ok: true, already: false }
+  })
+
+  // 先出窗口再提示提权，避免开发态「秒退看不见界面」
+  const skipPrompt = process.env.LIVE_ASSISTANT_SKIP_ADMIN_PROMPT === '1'
+  const elevated = await isRunningAsAdmin()
+  if (!elevated && !adminPrompted && !skipPrompt && mainWindow) {
+    adminPrompted = true
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '需要管理员权限',
+      message: '当前不是管理员权限',
+      detail:
+        '关闭进程、部分键鼠整蛊等功能在非管理员下可能失败或无效。\n建议以管理员身份重新启动本程序。',
+      buttons: ['以管理员启动', '继续使用（功能可能受限）'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    })
+    if (response === 0) {
+      relaunchAsAdmin()
+      return
+    }
+  }
 
   ipcMain.handle('action:notify', (_event, payload) => {
     const title = payload?.title || '直播助手'
@@ -148,10 +185,21 @@ app.whenReady().then(() => {
     return `data:${mime};base64,${buf.toString('base64')}`
   })
 
-  // 微软 Azure TTS
+  // TTS：melo（内置）/ azure
   ipcMain.handle('tts:speak', async (_event, opts) => {
     try {
-      return await azureSpeak(opts || {})
+      return await ttsSpeak(opts || {})
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  // 主进程本机播放 dataUrl（wav/mp3），保证能出声
+  ipcMain.handle('tts:playDataUrl', async (_event, payload) => {
+    try {
+      const dataUrl = typeof payload === 'string' ? payload : payload?.dataUrl
+      const volume = typeof payload === 'object' ? payload?.volume : 1
+      return await playDataUrlNative(dataUrl, volume)
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
     }

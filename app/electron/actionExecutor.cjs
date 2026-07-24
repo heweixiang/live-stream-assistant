@@ -11,11 +11,22 @@ function psEscape(s) {
   return String(s ?? '').replace(/'/g, "''")
 }
 
-async function runPs(script) {
+async function runPs(script, timeoutMs = 15000) {
+  // 强制 UTF-8，避免中文窗口标题在 GBK/UTF-8 混用下变成 �
+  const wrapped = `
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+${script}
+`
   const { stdout, stderr } = await execFileAsync(
     'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-    { windowsHide: true, timeout: 15000, maxBuffer: 2 * 1024 * 1024 },
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', wrapped],
+    {
+      windowsHide: true,
+      timeout: timeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+      encoding: 'utf8',
+    },
   )
   return { stdout: String(stdout || ''), stderr: String(stderr || '') }
 }
@@ -103,7 +114,60 @@ async function runMouse(action) {
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})
 `)
-    return
+    return { ok: true }
+  }
+
+  // 天旋地转：从 (x,y) 螺旋乱晃移到 (x2,y2)，耗时 duration 秒
+  if (op === 'dizzy') {
+    const x2 = Number(action.mouseX2)
+    const y2 = Number(action.mouseY2)
+    const endX = Number.isFinite(x2) ? x2 : x + 200
+    const endY = Number.isFinite(y2) ? y2 : y + 200
+    const durationSec = Math.min(30, Math.max(0.3, Number(action.mouseDurationSec) || 2))
+    const turns = Math.min(20, Math.max(1, Number(action.mouseSpinTurns) || 4))
+    const timeoutMs = Math.ceil(durationSec * 1000) + 8000
+    await runPs(
+      `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public class DizzyMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  public static void Run(int x1, int y1, int x2, int y2, double durationSec, double turns) {
+    if (x1 == 0 && y1 == 0) {
+      POINT p; GetCursorPos(out p); x1 = p.X; y1 = p.Y;
+    }
+    int steps = Math.Max(12, (int)(durationSec * 60));
+    int sleepMs = Math.Max(8, (int)(durationSec * 1000.0 / steps));
+    double dx = x2 - x1, dy = y2 - y1;
+    double dist = Math.Sqrt(dx * dx + dy * dy);
+    double amp = Math.Max(80.0, dist * 0.45);
+    var rnd = new Random();
+    for (int i = 0; i <= steps; i++) {
+      double t = (double)i / steps;
+      double cx = x1 + dx * t;
+      double cy = y1 + dy * t;
+      // 半径先放大再收束到终点，带一点随机抖动
+      double envelope = Math.Sin(t * Math.PI);
+      double radius = amp * envelope * (0.75 + 0.25 * rnd.NextDouble());
+      double angle = t * turns * 2.0 * Math.PI + rnd.NextDouble() * 0.4;
+      int px = (int)Math.Round(cx + Math.Cos(angle) * radius);
+      int py = (int)Math.Round(cy + Math.Sin(angle) * radius);
+      SetCursorPos(px, py);
+      if (i < steps) Thread.Sleep(sleepMs);
+    }
+    SetCursorPos(x2, y2);
+  }
+}
+"@
+[DizzyMouse]::Run(${x}, ${y}, ${endX}, ${endY}, ${durationSec}, ${turns})
+`,
+      timeoutMs,
+    )
+    return { ok: true, message: `天旋地转 ${durationSec}s` }
   }
 
   if (op === 'scroll') {
@@ -120,7 +184,7 @@ public class MouseScroll {
 "@
 [MouseScroll]::Scroll(${delta})
 `)
-    return
+    return { ok: true }
   }
 
   const flag =
@@ -144,6 +208,7 @@ public class MouseClick {
 "@
 [MouseClick]::Click(${x}, ${y}, ${flag.down}, ${flag.up})
 `)
+  return { ok: true }
 }
 
 async function runOther(action) {
@@ -153,20 +218,79 @@ async function runOther(action) {
     case 'notify':
       return { ok: true, kind: op, message: action.message || '' }
     case 'show_desktop': {
+      // ToggleDesktop 在部分环境无效；改用 MinimizeAll + Win+D 兜底
       await runPs(`
-$shell = New-Object -ComObject Shell.Application
-$shell.ToggleDesktop()
+$ErrorActionPreference = 'Continue'
+try {
+  $shell = New-Object -ComObject Shell.Application
+  $shell.MinimizeAll()
+} catch {}
+Start-Sleep -Milliseconds 80
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinDesktop {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  const byte VK_LWIN = 0x5B;
+  const byte VK_D = 0x44;
+  const uint KEYEVENTF_KEYUP = 0x0002;
+  public static void ShowDesktop() {
+    keybd_event(VK_LWIN, 0, 0, UIntPtr.Zero);
+    keybd_event(VK_D, 0, 0, UIntPtr.Zero);
+    keybd_event(VK_D, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+  }
+}
+"@
+[WinDesktop]::ShowDesktop()
 `)
-      return { ok: true }
+      return { ok: true, message: '已返回桌面' }
     }
     case 'close_process': {
       const name = String(action.processName || '').trim()
       if (!name) throw new Error('未填写要关闭的程序名')
-      const exe = name.toLowerCase().endsWith('.exe') ? name : `${name}.exe`
-      await execFileAsync('taskkill', ['/IM', exe, '/F'], { windowsHide: true }).catch((e) => {
-        throw new Error(`关闭程序失败：${e.message || e}`)
-      })
-      return { ok: true, message: `已结束进程 ${exe}` }
+      // 支持填「notepad」「notepad.exe」「C:\...\notepad.exe」
+      let base = name.replace(/^.*[\\/]/, '').trim()
+      if (!base) throw new Error('进程名无效')
+      const bare = base.toLowerCase().endsWith('.exe') ? base.slice(0, -4) : base
+      const exe = `${bare}.exe`
+      try {
+        const { stdout } = await runPs(`
+$ErrorActionPreference = 'Stop'
+$bare = '${psEscape(bare)}'
+$exe = '${psEscape(exe)}'
+$found = @(Get-Process -Name $bare -ErrorAction SilentlyContinue)
+if ($found.Count -eq 0) {
+  throw "未找到正在运行的进程：$exe。请点「刷新」从列表选择正确进程名（不要用窗口标题）。"
+}
+$killed = New-Object System.Collections.Generic.List[string]
+foreach ($p in $found) {
+  try {
+    Stop-Process -Id $p.Id -Force -ErrorAction Stop
+    $killed.Add("$($p.ProcessName)#$($p.Id)")
+  } catch {}
+}
+Start-Sleep -Milliseconds 150
+$left = @(Get-Process -Name $bare -ErrorAction SilentlyContinue)
+if ($left.Count -gt 0) {
+  $null = Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/IM', $exe, '/F', '/T') -Wait -PassThru -WindowStyle Hidden
+  Start-Sleep -Milliseconds 200
+  $left = @(Get-Process -Name $bare -ErrorAction SilentlyContinue)
+}
+if ($left.Count -gt 0) {
+  $ids = ($left | ForEach-Object { $_.Id }) -join ','
+  throw "未能结束进程 $exe（仍在运行 PID: $ids）。可能需要管理员权限。"
+}
+if ($killed.Count -gt 0) { "已结束：$($killed -join ', ')" } else { "已结束进程 $exe" }
+`)
+        const msg = (stdout || '').trim() || `已结束进程 ${exe}`
+        return { ok: true, message: msg }
+      } catch (e) {
+        const err = /** @type {Error & { stderr?: string, stdout?: string }} */ (e)
+        const raw = [err.stderr, err.stdout, err.message].filter(Boolean).join('\n')
+        const m = raw.match(/未找到正在运行的进程[^\r\n]+|未能结束进程[^\r\n]+/)
+        throw new Error(m ? m[0].trim() : `关闭程序失败：${(err.stderr || err.message || raw).toString().trim()}`)
+      }
     }
     case 'minimize_process': {
       const name = String(action.processName || '').trim()
@@ -232,8 +356,7 @@ async function executeAction(action) {
       await runKeyboard(action)
       return { ok: true }
     case 'mouse':
-      await runMouse(action)
-      return { ok: true }
+      return runMouse(action)
     case 'sound':
       if (action.soundMode === 'tts' || (!action.mediaPath && action.ttsText)) {
         return runTts(action)
@@ -247,30 +370,49 @@ async function executeAction(action) {
 }
 
 async function listWindowProcesses() {
-  const { stdout } = await runPs(`
-Get-Process |
+  const fs = require('fs')
+  const os = require('os')
+  const path = require('path')
+  // 写 UTF-8 临时文件再读，避免管道编码再次踩坑
+  const tmp = path.join(os.tmpdir(), `live-assistant-procs-${process.pid}-${Date.now()}.json`)
+  const tmpPs = tmp.replace(/'/g, "''")
+  try {
+    await runPs(`
+$list = @(Get-Process |
   Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } |
   Sort-Object ProcessName |
-  Select-Object @{N='name';E={$_.ProcessName}}, @{N='title';E={$_.MainWindowTitle}}, @{N='pid';E={$_.Id}} |
-  ConvertTo-Json -Compress
+  Select-Object @{N='name';E={$_.ProcessName}}, @{N='title';E={$_.MainWindowTitle}}, @{N='pid';E={$_.Id}})
+if ($list.Count -eq 0) {
+  '[]' | Out-File -FilePath '${tmpPs}' -Encoding utf8
+} else {
+  $list | ConvertTo-Json -Compress -Depth 4 | Out-File -FilePath '${tmpPs}' -Encoding utf8
+}
 `)
-  const raw = String(stdout || '').trim()
-  if (!raw) return []
-  const parsed = JSON.parse(raw)
-  const list = Array.isArray(parsed) ? parsed : [parsed]
-  const seen = new Set()
-  const out = []
-  for (const p of list) {
-    const name = String(p?.name || '').trim()
-    if (!name || seen.has(name.toLowerCase())) continue
-    seen.add(name.toLowerCase())
-    out.push({
-      name,
-      title: String(p?.title || '').trim(),
-      pid: Number(p?.pid) || 0,
-    })
+    if (!fs.existsSync(tmp)) return []
+    const raw = fs.readFileSync(tmp, 'utf8').replace(/^\uFEFF/, '').trim()
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    const list = Array.isArray(parsed) ? parsed : [parsed]
+    const seen = new Set()
+    const out = []
+    for (const p of list) {
+      const name = String(p?.name || '').trim()
+      if (!name || seen.has(name.toLowerCase())) continue
+      seen.add(name.toLowerCase())
+      out.push({
+        name,
+        title: String(p?.title || '').trim(),
+        pid: Number(p?.pid) || 0,
+      })
+    }
+    return out.slice(0, 80)
+  } finally {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      // ignore
+    }
   }
-  return out.slice(0, 80)
 }
 
 module.exports = { executeAction, listWindowProcesses }

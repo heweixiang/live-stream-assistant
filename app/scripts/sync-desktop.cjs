@@ -1,5 +1,6 @@
 /**
  * 把最新打包的 exe 同步到当前用户桌面：直播助手.exe
+ * 若桌面文件被占用（正在运行），则写为 直播助手-更新.exe
  */
 const fs = require('fs')
 const path = require('path')
@@ -9,6 +10,7 @@ const releaseDir = path.join(__dirname, '..', 'release')
 const desktop = path.join(os.homedir(), 'Desktop')
 const targetName = '直播助手.exe'
 const targetPath = path.join(desktop, targetName)
+const fallbackPath = path.join(desktop, '直播助手-更新.exe')
 
 function findLatestExe(dir) {
   if (!fs.existsSync(dir)) return null
@@ -31,7 +33,29 @@ if (!src) {
 }
 
 fs.mkdirSync(desktop, { recursive: true })
-fs.copyFileSync(src, targetPath)
-console.log(`[sync-desktop] ${src}`)
-console.log(`[sync-desktop] -> ${targetPath}`)
-console.log('[sync-desktop] 桌面已更新为最新版')
+
+function copyTo(dest) {
+  fs.copyFileSync(src, dest)
+  console.log(`[sync-desktop] ${src}`)
+  console.log(`[sync-desktop] -> ${dest}`)
+}
+
+try {
+  copyTo(targetPath)
+  console.log('[sync-desktop] 桌面已更新为最新版')
+} catch (e) {
+  const code = e && e.code
+  if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+    try {
+      copyTo(fallbackPath)
+      console.warn('[sync-desktop] 桌面 直播助手.exe 正在运行，无法覆盖')
+      console.warn('[sync-desktop] 已另存为：直播助手-更新.exe —— 请先关掉旧版，再双击这个新文件，或删掉旧的后把它改名为 直播助手.exe')
+      process.exit(0)
+    } catch (e2) {
+      console.error('[sync-desktop] 备用复制也失败：', e2.message || e2)
+      process.exit(1)
+    }
+  }
+  console.error('[sync-desktop] 复制失败：', e.message || e)
+  process.exit(1)
+}

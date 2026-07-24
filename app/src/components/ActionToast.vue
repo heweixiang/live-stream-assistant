@@ -9,7 +9,8 @@ watch(
   () => props.item,
   (val, _prev, onCleanup) => {
     if (!val) return
-    const timer = setTimeout(() => emit('done'), 3200)
+    const ms = Math.max(500, Math.min(60000, Number(val.durationMs) || 3200))
+    const timer = setTimeout(() => emit('done'), ms)
     onCleanup(() => clearTimeout(timer))
   },
 )

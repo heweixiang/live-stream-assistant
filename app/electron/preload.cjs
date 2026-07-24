@@ -10,8 +10,11 @@ contextBridge.exposeInMainWorld('liveAssistant', {
   openFile: (opts) => ipcRenderer.invoke('dialog:openFile', opts),
   /** 本地媒体 → data URL */
   mediaAsDataUrl: (filePath) => ipcRenderer.invoke('media:asDataUrl', filePath),
-  /** 微软 Azure TTS → data URL */
+  /** TTS 合成 → data URL（melo / azure） */
   ttsSpeak: (opts) => ipcRenderer.invoke('tts:speak', opts),
+  /** 主进程本机播放，避免渲染进程 Audio 无声 */
+  playAudioDataUrl: (dataUrl, volume) =>
+    ipcRenderer.invoke('tts:playDataUrl', { dataUrl, volume }),
   saveVoiceSample: (payload) => ipcRenderer.invoke('tts:saveSample', payload),
   listVoiceSamples: () => ipcRenderer.invoke('tts:listSamples'),
   deleteVoiceSample: (id) => ipcRenderer.invoke('tts:deleteSample', id),
@@ -29,5 +32,9 @@ contextBridge.exposeInMainWorld('liveAssistant', {
   douyinLogout: () => ipcRenderer.invoke('auth:douyinLogout'),
   /** 查看当前分区是否已登录 */
   douyinAuthStatus: () => ipcRenderer.invoke('auth:douyinStatus'),
+  /** 是否以管理员运行 */
+  isAdmin: () => ipcRenderer.invoke('app:isAdmin'),
+  /** 以管理员重新启动（会弹 UAC） */
+  relaunchAsAdmin: () => ipcRenderer.invoke('app:relaunchAsAdmin'),
   platform: process.platform,
 })

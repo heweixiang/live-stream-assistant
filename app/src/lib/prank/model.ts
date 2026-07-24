@@ -61,7 +61,14 @@ export type ActionCategory =
   | 'hardware'
   | 'other'
 
-export type MouseOp = 'click_left' | 'click_right' | 'click_middle' | 'move' | 'scroll'
+export type MouseOp =
+  | 'click_left'
+  | 'click_right'
+  | 'click_middle'
+  | 'move'
+  | 'scroll'
+  /** 从起点螺旋/乱晃移动到终点，制造天旋地转感 */
+  | 'dizzy'
 export type SoundMode = 'file' | 'tts'
 export type OtherOp =
   | 'toast'
@@ -76,6 +83,8 @@ export type OtherOp =
 export interface RuleAction {
   id: string
   category: ActionCategory
+  /** 是否参与触发；默认 true，未勾选则跳过 */
+  enabled?: boolean
   /** 开始前延迟（秒） */
   delayStartSec: number
   /** 结束后再等（秒），用于顺序队列间距 */
@@ -89,6 +98,14 @@ export interface RuleAction {
   mouseOp?: MouseOp
   mouseX?: number
   mouseY?: number
+  /** 天旋地转终点 X */
+  mouseX2?: number
+  /** 天旋地转终点 Y */
+  mouseY2?: number
+  /** 天旋地转总耗时（秒） */
+  mouseDurationSec?: number
+  /** 螺旋圈数，越大越晕，默认 4 */
+  mouseSpinTurns?: number
   scrollDelta?: number
   // —— 音视频 ——
   /** file=本地音频；tts=系统语音朗读文本 */
@@ -98,7 +115,7 @@ export interface RuleAction {
   ttsText?: string
   /** TTS 语速 0.5~2，默认 1 */
   ttsRate?: number
-  /** TTS 音量 0~1，默认 1 */
+  /** TTS 音量 0~3，>1 为增益放大，默认 1 */
   ttsVolume?: number
   // —— OBS（占位，后续接 WebSocket） ——
   obsSourceName?: string
@@ -111,6 +128,8 @@ export interface RuleAction {
   otherOp?: OtherOp
   processName?: string
   message?: string
+  /** 弹窗提示显示多久后关闭（秒），默认 3 */
+  toastCloseSec?: number
 }
 
 export interface PrankRule {
@@ -132,6 +151,8 @@ export interface FiredAction {
   ruleName: string
   message: string
   at: number
+  /** 弹窗显示时长（毫秒），缺省约 3.2s */
+  durationMs?: number
 }
 
 export const TRIGGER_OPTIONS: { value: TriggerKind; label: string; ready: boolean }[] = [
@@ -179,6 +200,7 @@ export function createEmptyAction(category: ActionCategory = 'keyboard'): RuleAc
   return {
     id: newActionId(),
     category,
+    enabled: true,
     delayStartSec: 0,
     delayEndSec: 0,
     keys: '',
@@ -188,6 +210,10 @@ export function createEmptyAction(category: ActionCategory = 'keyboard'): RuleAc
     mouseOp: 'click_left',
     mouseX: 0,
     mouseY: 0,
+    mouseX2: 400,
+    mouseY2: 300,
+    mouseDurationSec: 2,
+    mouseSpinTurns: 4,
     soundMode: 'file',
     mediaPath: '',
     ttsText: '整蛊触发',
@@ -195,6 +221,7 @@ export function createEmptyAction(category: ActionCategory = 'keyboard'): RuleAc
     ttsVolume: 1,
     otherOp: 'toast',
     message: '整蛊触发',
+    toastCloseSec: 3,
     processName: '',
   }
 }
@@ -240,6 +267,7 @@ export function actionSummary(action: RuleAction): string {
         click_middle: '中键单击',
         move: '移动到指定位置',
         scroll: '滚轮',
+        dizzy: `天旋地转 ${action.mouseDurationSec ?? 2}s`,
       }
       return map[action.mouseOp || 'click_left']
     }

@@ -4,6 +4,7 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 .venv/
+.venv-melo/
 venv/
 .env
 .env.*
@@ -16,3 +17,5 @@ core/config/*.json
 .idea/
 .vscode/*
 !.vscode/extensions.json
+models/
+vendor/MeloTTS/

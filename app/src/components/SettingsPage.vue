@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import DarkSelect from './DarkSelect.vue'
 import AnnounceSettingsPanel from './AnnounceSettingsPanel.vue'
 import {
-  AZURE_VOICE_OPTIONS,
   loadTtsSettings,
   saveTtsSettings,
   type TtsSettings,
@@ -14,23 +12,18 @@ import { speakText } from '../lib/tts/speak'
 type SettingsMenuId = 'tts' | 'voice-clone' | 'announce' | 'general' | 'about'
 
 const MENUS: { id: SettingsMenuId; label: string; desc: string; ready: boolean }[] = [
-  { id: 'tts', label: 'TTS 语音', desc: 'Azure / 本机音色', ready: true },
-  { id: 'voice-clone', label: '语音克隆', desc: '录音与个人音色', ready: true },
+  { id: 'tts', label: 'TTS 语音', desc: 'MeloTTS / 本机', ready: true },
+  { id: 'voice-clone', label: '语音克隆', desc: '录音样本管理', ready: true },
   { id: 'announce', label: '语音播报', desc: '点赞聚合 / 模板', ready: true },
-  { id: 'general', label: '通用', desc: '数据目录 / 导入导出', ready: true },
+  { id: 'general', label: '通用', desc: '权限 / 数据目录', ready: true },
   { id: 'about', label: '关于', desc: '版本与说明', ready: true },
-]
-
-const PERSONAL_VOICE_OPTIONS = [
-  { value: 'DragonLatestNeural', label: 'DragonLatestNeural' },
-  { value: 'PhoenixLatestNeural', label: 'PhoenixLatestNeural' },
 ]
 
 const menu = ref<SettingsMenuId>('tts')
 const form = reactive<TtsSettings>(loadTtsSettings())
 const hint = ref('')
 const testing = ref(false)
-const testText = ref('欢迎来到直播间，这是微软语音试听。')
+const testText = ref('欢迎来到直播间，这是内置语音试听。')
 
 const samples = ref<VoiceSampleMeta[]>([])
 const recording = ref(false)
@@ -44,9 +37,7 @@ let stream: MediaStream | null = null
 
 const canElectron = computed(() => !!window.liveAssistant?.getDataRoot)
 const dataRoot = ref('')
-const cloneReady = computed(
-  () => form.useClone && !!form.speakerProfileId.trim() && form.provider === 'azure',
-)
+const isAdmin = ref<boolean | null>(null)
 const currentMenu = computed(() => MENUS.find((m) => m.id === menu.value) || MENUS[0])
 
 async function refreshDataRoot() {
@@ -55,6 +46,26 @@ async function refreshDataRoot() {
     return
   }
   dataRoot.value = await window.liveAssistant.getDataRoot()
+}
+
+async function refreshAdmin() {
+  if (!window.liveAssistant?.isAdmin) {
+    isAdmin.value = null
+    return
+  }
+  try {
+    isAdmin.value = await window.liveAssistant.isAdmin()
+  } catch {
+    isAdmin.value = null
+  }
+}
+
+async function relaunchAdmin() {
+  try {
+    await window.liveAssistant?.relaunchAsAdmin?.()
+  } catch (e) {
+    hint.value = e instanceof Error ? e.message : '提权失败'
+  }
 }
 function persist() {
   saveTtsSettings({ ...form })
@@ -73,12 +84,16 @@ async function refreshSamples() {
 watch(menu, (id) => {
   hint.value = ''
   if (id === 'voice-clone') void refreshSamples()
-  if (id === 'general') void refreshDataRoot()
+  if (id === 'general') {
+    void refreshDataRoot()
+    void refreshAdmin()
+  }
 })
 
 onMounted(() => {
   void refreshSamples()
   void refreshDataRoot()
+  void refreshAdmin()
 })
 
 onBeforeUnmount(() => {
@@ -96,12 +111,13 @@ async function onTestSpeak() {
   hint.value = ''
   try {
     persist()
+    // 试听不走排队，失败要直接抛出提示
     await speakText(testText.value, {
       rate: form.defaultRate,
       volume: form.defaultVolume,
+      queue: false,
     })
-    hint.value =
-      form.provider === 'azure' && form.azureKey.trim() ? 'Azure 试听完成' : '本机 TTS 试听完成'
+    hint.value = form.provider === 'melo' ? 'MeloTTS 试听完成' : '本机 TTS 试听完成'
   } catch (e) {
     hint.value = e instanceof Error ? e.message : '试听失败'
   } finally {
@@ -163,8 +179,8 @@ async function finalizeRecord(mime: string) {
       return
     }
     const durationSec = Math.max(1, Math.round((Date.now() - recStartedAt) / 1000))
-    if (durationSec < 5) {
-      recError.value = '建议至少录 5 秒（微软个人音色要求约 5–90 秒干净人声）'
+    if (durationSec < 3) {
+      recError.value = '建议至少录 3 秒'
     }
     const buf = await blob.arrayBuffer()
     const bytes = new Uint8Array(buf)
@@ -190,8 +206,23 @@ async function playSample(id: string) {
   if (!api?.readVoiceSample) return
   try {
     const url = await api.readVoiceSample(id)
+    // webm 录音优先渲染进程；wav/mp3 走主进程更稳
+    const isWebm = url.startsWith('data:audio/webm')
+    if (!isWebm && api.playAudioDataUrl) {
+      try {
+        const res = await api.playAudioDataUrl(url, form.defaultVolume)
+        if (res?.ok !== false) return
+      } catch {
+        // fallback below
+      }
+    }
     const audio = new Audio(url)
+    audio.volume = Math.min(1, Math.max(0, form.defaultVolume || 1))
     await audio.play()
+    await new Promise<void>((resolve, reject) => {
+      audio.onended = () => resolve()
+      audio.onerror = () => reject(new Error('样本播放失败'))
+    })
   } catch (e) {
     hint.value = e instanceof Error ? e.message : '播放失败'
   }
@@ -205,8 +236,7 @@ async function removeSample(id: string) {
 }
 
 function openClonesFolderHint() {
-  hint.value =
-    '录音保存在数据目录 voice-clones 下。拿到 Azure Personal Voice 的 speakerProfileId 后填入即可启用克隆朗读。'
+  hint.value = '录音保存在数据目录 voice-clones 下，可随时点「播」回听。'
 }
 
 async function openDataFolder() {
@@ -303,9 +333,9 @@ async function importZip() {
         <fieldset class="box">
           <legend>引擎</legend>
           <div class="modes">
-            <label class="tg" :class="{ on: form.provider === 'azure' }">
-              <input v-model="form.provider" type="radio" value="azure" @change="persist" />
-              微软 Azure
+            <label class="tg" :class="{ on: form.provider === 'melo' }">
+              <input v-model="form.provider" type="radio" value="melo" @change="persist" />
+              内置 MeloTTS（推荐）
             </label>
             <label class="tg" :class="{ on: form.provider === 'system' }">
               <input v-model="form.provider" type="radio" value="system" @change="persist" />
@@ -313,35 +343,17 @@ async function importZip() {
             </label>
           </div>
 
-          <template v-if="form.provider === 'azure'">
+          <template v-if="form.provider === 'melo'">
             <label>
-              <span>Speech 密钥</span>
+              <span>服务地址</span>
               <input
-                v-model="form.azureKey"
-                type="password"
-                autocomplete="off"
-                placeholder="Azure 门户 → Speech 资源 → 密钥"
+                v-model="form.meloUrl"
+                placeholder="http://127.0.0.1:8766"
                 @change="persist"
               />
             </label>
-            <div class="row2">
-              <label>
-                <span>区域 Region</span>
-                <input v-model="form.azureRegion" placeholder="eastasia" @change="persist" />
-              </label>
-              <label>
-                <span>预置音色</span>
-                <DarkSelect
-                  v-model="form.azureVoice"
-                  :options="AZURE_VOICE_OPTIONS"
-                  @change="persist"
-                />
-              </label>
-            </div>
             <p class="tip">
-              在
-              <a href="https://portal.azure.com" target="_blank" rel="noreferrer">Azure 门户</a>
-              创建「语音 / Speech」资源。克隆与播报模板见左侧其它菜单。
+              先另开终端运行 <code>npm run tts</code> 启动本地语音服务（首次加载模型约十几秒）。中文音色，免密钥。
             </p>
           </template>
           <p v-else class="tip">使用 Windows / 浏览器内置语音，无需密钥。</p>
@@ -359,17 +371,18 @@ async function importZip() {
               />
             </label>
             <label>
-              <span>默认音量 (0~1)</span>
+              <span>默认音量 (0~3，&gt;1 更响)</span>
               <input
                 v-model.number="form.defaultVolume"
                 type="number"
                 min="0"
-                max="1"
+                max="3"
                 step="0.1"
                 @change="persist"
               />
             </label>
           </div>
+          <p class="tip">音量超过 1 会对合成音频做增益放大（相对系统音量可更响），建议先试 1.5～2。</p>
           <label>
             <span>试听文本</span>
             <textarea v-model="testText" rows="3" />
@@ -379,35 +392,17 @@ async function importZip() {
 
       <div v-else-if="menu === 'voice-clone'" class="panel">
         <fieldset class="box">
-          <legend>个人音色</legend>
+          <legend>录音样本</legend>
           <p class="tip">
-            ① 录制 5–90 秒干净人声 → ② Azure Speech Studio 开通 Personal Voice（需申请）拿到
-            speakerProfileId → ③ 填入并开启下方开关。
+            录制并保存人声样本，可随时回听。当前朗读使用内置 MeloTTS
+            固定中文声线（本地变声后续再接）。
           </p>
 
-          <label class="check">
-            <input v-model="form.useClone" type="checkbox" @change="persist" />
-            朗读时优先使用克隆音色
-            <em v-if="cloneReady" class="ok">已就绪</em>
-            <em v-else class="muted">需填写 Profile ID 且引擎为 Azure</em>
-          </label>
-
-          <label>
-            <span>speakerProfileId</span>
-            <input
-              v-model="form.speakerProfileId"
-              placeholder="Azure Personal Voice 返回的 ID"
-              @change="persist"
-            />
-          </label>
-          <label>
-            <span>基底模型</span>
-            <DarkSelect
-              v-model="form.personalVoiceName"
-              :options="PERSONAL_VOICE_OPTIONS"
-              @change="persist"
-            />
-          </label>
+          <div class="rec-bar" style="margin-bottom: 12px">
+            <button type="button" class="primary" :disabled="testing" @click="onTestSpeak">
+              {{ testing ? '试听中…' : '试听当前朗读音色' }}
+            </button>
+          </div>
 
           <div class="rec-bar">
             <button v-if="!recording" type="button" class="primary" @click="startRecord">
@@ -444,6 +439,29 @@ async function importZip() {
       </div>
 
       <div v-else-if="menu === 'general'" class="panel">
+        <fieldset class="box">
+          <legend>运行权限</legend>
+          <p class="tip">
+            关闭进程、部分键鼠整蛊建议以管理员运行。打包版启动时会自动请求 UAC；开发态可用
+            <code>npm run app</code>（会弹 UAC）。
+          </p>
+          <p class="tip">
+            当前状态：
+            <strong v-if="isAdmin === true" style="color: #8dffa0">已是管理员</strong>
+            <strong v-else-if="isAdmin === false" style="color: #ffb15a">非管理员</strong>
+            <strong v-else>检测中 / 非桌面端</strong>
+          </p>
+          <div class="rec-bar">
+            <button
+              type="button"
+              class="primary"
+              :disabled="!canElectron || isAdmin === true"
+              @click="relaunchAdmin"
+            >
+              以管理员重新启动
+            </button>
+          </div>
+        </fieldset>
         <fieldset class="box">
           <legend>数据目录</legend>
           <p class="tip">
