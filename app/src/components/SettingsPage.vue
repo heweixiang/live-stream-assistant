@@ -490,7 +490,7 @@ async function importZip() {
         <div class="placeholder">
           <h2>直播助手</h2>
           <p>桌面端整蛊 / 监听工具。设置项会陆续往左侧菜单扩展。</p>
-          <p class="muted">版本 0.1.0</p>
+          <p class="muted">版本 0.1.0-beta.3</p>
         </div>
       </div>
     </div>
