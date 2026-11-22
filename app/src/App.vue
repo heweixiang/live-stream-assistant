@@ -22,6 +22,7 @@ import {
   type LiveLayout,
 } from './lib/storage'
 import { loadStaticGifts, type StaticGift } from './lib/douyinGifts'
+import { useGiftDiamondOverrides } from './lib/useGiftDiamondOverrides'
 import type { FiredAction } from './types'
 import EventFeed from './components/EventFeed.vue'
 import EnterLikeBoard from './components/EnterLikeBoard.vue'
@@ -30,19 +31,41 @@ import PrankLog from './components/PrankLog.vue'
 import PrankStats from './components/PrankStats.vue'
 import RuleStudio from './components/RuleStudio.vue'
 import SettingsPage from './components/SettingsPage.vue'
+import ReplayPage from './components/ReplayPage.vue'
 import ActionToast from './components/ActionToast.vue'
 import StatsBar from './components/StatsBar.vue'
 import { matchRules } from './lib/prank/rulesEngine'
 import { runRuleEffects } from './lib/prank/actionRunner'
+import { ReplayRecorder } from './lib/replay/recorder'
+import { bindReplayRecorder } from './lib/replay/activeRecorder'
+import { persistReplaySession } from './lib/replay/persist'
+import { loadReplayConfig } from './lib/replay/settings'
+import type { ReplayConfig } from './lib/replay/types'
 import { tryAnnounceEvent } from './lib/tts/announce'
 import { clearLikeBucket, ingestLike, setLikeSettleHandler } from './lib/likeBatch'
+import {
+  clearGiftBucket,
+  ingestGift,
+  setGiftSettleHandler,
+} from './lib/giftBatch'
 import { stopSpeak } from './lib/tts/speak'
 import { reloadPanelFontsFromStorage, usePanelFonts } from './composables/usePanelFonts'
 import { reloadPrankMasterFromStorage, usePrankMaster } from './composables/usePrankMaster'
+import {
+  buildOverlayPayload,
+  loadOverlaySettings,
+} from './lib/prank/overlaySettings'
+import {
+  appendFired,
+  clearSessionStats,
+  loadSessionStats,
+  saveSessionStats,
+  type SessionStats,
+} from './lib/sessionStats'
 
 const RECONNECT_MS = 60_000
 
-type PageId = 'live' | 'rules' | 'settings'
+type PageId = 'live' | 'rules' | 'replay' | 'settings'
 
 function cookieLooksLoggedIn(c: string) {
   return /(?:^|;\s*)(sessionid|sid_tt|uid_tt|sid_guard)=/i.test(c || '')
@@ -55,6 +78,7 @@ const {
   events,
   lastEvent,
   clearEvents,
+  restoreSessionTotals,
   connectRoom,
   disconnectRoom,
   chatTotal,
@@ -68,7 +92,9 @@ const {
 
 const page = ref<PageId>('live')
 const rules = ref(loadRules())
-const firedActions = ref<FiredAction[]>([])
+const session = ref<SessionStats>(loadSessionStats())
+const firedActions = computed(() => session.value.firedActions)
+const ruleCounts = computed(() => session.value.ruleCounts)
 const toast = ref<FiredAction | null>(null)
 const liveId = ref(loadLiveId())
 const cookie = ref(loadCookie())
@@ -78,72 +104,199 @@ const layout = ref<LiveLayout>(loadLayout())
 const giftCatalog = ref<GiftCatalogItem[]>(loadGiftCatalog())
 /** 抖音全量礼物静态目录（名+图标），规则页点选用 */
 const staticGifts = ref<StaticGift[]>([])
+const { overrides: giftDiamondOverrides, resolve: resolveGiftDiamond, reload: reloadGiftDiamondOverrides } =
+  useGiftDiamondOverrides()
 const { fonts: panelFonts } = usePanelFonts()
 const { prankMasterEnabled } = usePrankMaster()
-/** 有直播号则默认要连；手动点断开后本会话内暂停自动重连 */
-const wantConnect = ref(!!liveId.value.trim())
+const replayCfg = ref<ReplayConfig>(loadReplayConfig())
+const replayRecorder = new ReplayRecorder(replayCfg.value)
+bindReplayRecorder(replayRecorder)
+/** 点「开播」后为 true；手动「下播」清掉。意外断线保持 true 以便自动重连 */
+const wantConnect = ref(false)
+saveWantConnect(false)
 const connectHint = ref('')
-const hasTriedConnect = ref(wantConnect.value)
+const hasTriedConnect = ref(false)
 /** 是否管理员；null=检测中 */
 const isAdmin = ref<boolean | null>(null)
-const adminBannerDismissed = ref(false)
 
 const gifts = computed(() => events.value.filter((e) => e.type === 'gift'))
 const enters = computed(() => events.value.filter((e) => e.type === 'enter'))
 const likes = computed(() => events.value.filter((e) => e.type === 'like'))
-/** 规则页礼物选项：静态全量目录 + 本场/历史收到的礼物（后者优先图标与计数） */
+/** 规则页礼物选项：静态目录 + 历史收到次数 + 用户改价 */
 const giftOptions = computed(() => {
+  void giftDiamondOverrides.value
   const map = new Map<
     string,
     { name: string; icon?: string; count?: number; panel?: boolean; diamond?: number }
   >()
   for (const g of staticGifts.value) {
-    map.set(g.name, { name: g.name, icon: g.icon, count: 0, panel: g.panel, diamond: g.diamond })
+    map.set(g.name, {
+      name: g.name,
+      icon: g.icon,
+      count: 0,
+      panel: g.panel,
+      diamond: resolveGiftDiamond(g.name, g.diamond),
+    })
   }
   for (const g of giftCatalog.value) {
     const prev = map.get(g.name)
+    const base = prev?.diamond ?? 0
     map.set(g.name, {
       name: g.name,
       icon: g.icon || prev?.icon,
       count: g.count,
       panel: prev?.panel,
-      diamond: prev?.diamond,
+      diamond: resolveGiftDiamond(g.name, base),
     })
   }
+  // 本场事件只补图标；次数已写入 giftCatalog，避免重复累加
   for (const e of gifts.value) {
     const name = (e.gift_name || '').trim()
     if (!name) continue
     const prev = map.get(name)
-    map.set(name, {
-      name,
-      icon: e.gift_icon || prev?.icon,
-      count: (prev?.count || 0) + (e.gift_count || 1),
-      panel: prev?.panel,
-      diamond: prev?.diamond,
-    })
+    if (!prev) {
+      map.set(name, {
+        name,
+        icon: e.gift_icon,
+        count: 0,
+        diamond: resolveGiftDiamond(name, 0),
+      })
+      continue
+    }
+    if (e.gift_icon && !prev.icon) {
+      map.set(name, { ...prev, icon: e.gift_icon })
+    }
   }
   return [...map.values()].sort(
     (a, b) => (b.count || 0) - (a.count || 0) || a.name.localeCompare(b.name, 'zh'),
   )
 })
 
-onMounted(() => {
-  setLikeSettleHandler((merged) => {
-    void tryAnnounceEvent(merged)
-    if (!prankMasterEnabled.value) return
-    const hits = matchRules(merged, rules.value)
-    if (!hits.length) return
-    firedActions.value = [...firedActions.value, ...hits.map((h) => h.fired)].slice(-50)
-    for (const hit of hits) {
-      void runRuleEffects(hit.rule, hit.times, hit.intervalSec, {
-        dryToast: (m) => onRuleToast(m),
-      }).catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err)
-        connectHint.value = `玩法执行失败：${msg}`
-        onRuleToast(msg)
-      })
-    }
+/** 推送整蛊计数到 OBS 叠层 */
+function pushOverlayState() {
+  const api = window.liveAssistant
+  if (!api?.overlaySetState) return
+  const settings = loadOverlaySettings()
+  const payload = buildOverlayPayload(
+    rules.value,
+    session.value.firedActions,
+    settings,
+    session.value.ruleCounts,
+  )
+  // 未自定义图标时，礼物玩法用礼物目录图标兜底
+  const giftIcon = new Map(giftOptions.value.map((g) => [g.name, g.icon || '']))
+  for (const row of payload.rows) {
+    if (row.icon) continue
+    const rule = rules.value.find((r) => r.id === row.ruleId)
+    const gName =
+      rule?.trigger?.kind === 'gift' ? String(rule.trigger.giftName || '').trim() : ''
+    if (gName && giftIcon.get(gName)) row.icon = giftIcon.get(gName) || ''
+  }
+  void api.overlaySetState(payload)
+}
+
+function persistSession() {
+  saveSessionStats({
+    ...session.value,
+    chatTotal: chatTotal.value,
+    giftTotal: giftTotal.value,
+    enterTotal: enterTotal.value,
   })
+}
+
+function recordHits(hits: { fired: FiredAction; rule: (typeof rules.value)[0]; times: number; intervalSec: number }[]) {
+  const next = appendFired(session.value, hits.map((h) => h.fired))
+  session.value = {
+    ...session.value,
+    ...next,
+    chatTotal: chatTotal.value,
+    giftTotal: giftTotal.value,
+    enterTotal: enterTotal.value,
+  }
+  persistSession()
+  for (const hit of hits) {
+    replayRecorder.pushPrank(hit.fired)
+    // 正式触发不弹 Toast/系统通知；测试玩法仍走 RuleStudio 的 dryToast
+    void runRuleEffects(hit.rule, hit.times, hit.intervalSec).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      connectHint.value = `玩法执行失败：${msg}`
+    })
+  }
+}
+
+/** 点赞结算 / 礼物结算共用：播报 + 整蛊 */
+function onSettledLiveEvent(event: import('./types').LiveEvent) {
+  replayRecorder.pushLiveEvent(event)
+  void tryAnnounceEvent(event)
+  if (!prankMasterEnabled.value) return
+  const hits = matchRules(event, rules.value)
+  if (!hits.length) return
+  recordHits(hits)
+}
+
+function beginReplaySession() {
+  replayCfg.value = loadReplayConfig()
+  replayRecorder.updateConfig(replayCfg.value)
+  const fin = replayRecorder.onConnected(liveId.value.trim())
+  void persistReplayIfNeeded(fin, '开新场')
+}
+
+function pauseReplaySession() {
+  replayRecorder.onDisconnected()
+}
+
+async function persistReplayIfNeeded(s: import('./lib/replay/types').ReplaySession | null, reason: string) {
+  if (!s) return
+  if (s.eventCount < 1 && s.durationSec < 60) return
+  try {
+    const res = await persistReplaySession(s, replayCfg.value.maxSessions)
+    if (res?.ok) {
+      onRuleToast(`复盘已保存（${s.liveId || '本场'} · ${reason}）`)
+    }
+  } catch (e) {
+    console.warn('[replay] save failed', e)
+  }
+}
+
+async function endReplaySession(reason: string) {
+  const s = replayRecorder.finalize()
+  await persistReplayIfNeeded(s, reason)
+}
+
+function onReplayConfigChanged(cfg: ReplayConfig) {
+  replayCfg.value = cfg
+  replayRecorder.updateConfig(cfg)
+}
+
+function checkReplayPauseTimeout() {
+  const fin = replayRecorder.checkPauseTimeout()
+  void persistReplayIfNeeded(fin, '断线超时')
+}
+
+function onClearSession() {
+  clearEvents()
+  clearSessionStats()
+  session.value = loadSessionStats()
+  clearLikeBucket()
+  clearGiftBucket()
+  pushOverlayState()
+}
+
+async function ensureOverlayServer() {
+  const api = window.liveAssistant
+  if (!api?.overlayStart) return
+  const settings = loadOverlaySettings()
+  if (!settings.enabled) {
+    await api.overlayStop?.()
+    return
+  }
+  const res = await api.overlayStart(settings.port)
+  if (res?.ok) pushOverlayState()
+}
+
+onMounted(() => {
+  setLikeSettleHandler(onSettledLiveEvent)
+  setGiftSettleHandler(onSettledLiveEvent)
 
   void (async () => {
     const { bootstrapFromDisk, flushNowToDisk } = await import('./lib/diskSync')
@@ -159,10 +312,15 @@ onMounted(() => {
     }
     layout.value = loadLayout()
     giftCatalog.value = loadGiftCatalog()
+    // 非今日次数视为测试数据，清零并落盘
+    saveGiftCatalog(giftCatalog.value)
+    reloadGiftDiamondOverrides()
     reloadPanelFontsFromStorage()
     reloadPrankMasterFromStorage()
+    session.value = loadSessionStats()
+    restoreSessionTotals(session.value)
     if (boot.ok) await flushNowToDisk()
-    const list = await loadStaticGifts()
+    const list = await loadStaticGifts({ force: true })
     staticGifts.value = list
     // 管理员权限检测（顶栏常驻提醒）
     try {
@@ -174,7 +332,28 @@ onMounted(() => {
     } catch {
       isAdmin.value = true
     }
+    // OBS 叠层：配置启用则随应用启动
+    await ensureOverlayServer()
+    pushOverlayState()
   })()
+})
+
+watch([session, rules], () => pushOverlayState(), { deep: true })
+watch(page, (p) => {
+  // 设置页改过次数/抖钻后，回规则页要重新灌入
+  if (p === 'rules' || p === 'settings') {
+    giftCatalog.value = loadGiftCatalog()
+    reloadGiftDiamondOverrides()
+  }
+})
+watch([chatTotal, giftTotal, enterTotal], () => {
+  session.value = {
+    ...session.value,
+    chatTotal: chatTotal.value,
+    giftTotal: giftTotal.value,
+    enterTotal: enterTotal.value,
+  }
+  persistSession()
 })
 
 async function onRelaunchAsAdmin() {
@@ -185,10 +364,8 @@ async function onRelaunchAsAdmin() {
   }
 }
 
-function dismissAdminBanner() {
-  adminBannerDismissed.value = true
-}
 function flushDiskOnLeave() {
+  void endReplaySession('退出')
   void import('./lib/diskSync').then((m) => m.flushNowToDisk())
 }
 window.addEventListener('pagehide', flushDiskOnLeave)
@@ -201,14 +378,15 @@ const needGiftCookie = computed(() => !cookieLooksLoggedIn(cookie.value))
 const cookieLoggedIn = computed(() => cookieLooksLoggedIn(cookie.value))
 const canElectronLogin = computed(() => !!window.liveAssistant?.douyinLogin)
 
-const showRoomStatus = computed(
-  () => hasTriedConnect.value && (roomState.value === 'connecting' || roomState.value === 'connected'),
-)
+/** 监听页常显开播连接状态 */
+const showRoomStatus = computed(() => page.value === 'live')
 
 const roomStatusText = computed(() => {
-  if (roomState.value === 'connected') return '已连接'
-  if (roomState.value === 'connecting') return '连接中…'
-  return ''
+  if (roomState.value === 'connected') return '直播中'
+  if (roomState.value === 'connecting') return '开播中…'
+  if (wantConnect.value) return '重连中…'
+  if (hasTriedConnect.value) return '已断开'
+  return '未开播'
 })
 
 watch(
@@ -235,14 +413,14 @@ watch(
 
 watch(wantConnect, (v) => saveWantConnect(v))
 
-function tryConnect(reason: 'manual' | 'auto' | 'retry' = 'manual') {
+function tryConnect(reason: 'manual' | 'pending' | 'retry' = 'manual') {
   const id = liveId.value.trim()
   if (!id) {
     if (reason === 'manual') connectHint.value = '请填写直播号（live.douyin.com/ 后面的数字）'
     return false
   }
   if (!coreOnline.value) {
-    if (reason === 'manual') connectHint.value = '本地服务未启动，请先运行 python core/server.py'
+    if (reason === 'manual') connectHint.value = '本地核心服务未启动（桌面端会自动拉起；若持续失败请查看 Documents/直播助手/logs/live-core.log）'
     return false
   }
   if (roomState.value === 'connecting' || roomState.value === 'connected') return false
@@ -252,38 +430,35 @@ function tryConnect(reason: 'manual' | 'auto' | 'retry' = 'manual') {
   saveLiveId(id)
   const ok = connectRoom('douyin', id, cookie.value)
   if (ok) {
-    if (reason !== 'retry') {
-      clearEvents()
-      firedActions.value = []
-    }
     const tip = cookie.value.trim() ? '' : '（未填 Cookie，部分直播间可能收不到礼物）'
-    connectHint.value = (reason === 'retry' ? `重连中 ${id}` : `正在连接 ${id}`) + tip
+    const head = reason === 'retry' ? `断线重连 ${id}` : `正在开播连接 ${id}`
+    connectHint.value = head + tip
   }
   return ok
 }
 
+/** 开播：手动连接直播间 */
 function onConnect() {
   connectHint.value = ''
   tryConnect('manual')
 }
 
+/** 下播：断开、收尾复盘，且不再自动重连 */
 function onDisconnect() {
   wantConnect.value = false
   hasTriedConnect.value = false
   disconnectRoom()
   connectHint.value = ''
+  void endReplaySession('下播')
 }
 
-watch(
-  coreOnline,
-  (online) => {
-    if (online && wantConnect.value && liveId.value.trim()) {
-      tryConnect('auto')
-    }
-  },
-  { immediate: true },
-)
+watch(coreOnline, (online) => {
+  if (online && wantConnect.value && liveId.value.trim()) {
+    if (roomState.value === 'disconnected') tryConnect('pending')
+  }
+})
 
+/** 开播期间意外断线：定时自动重连；手动下播后 wantConnect=false 不会重连 */
 let reconnectTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
   if (!wantConnect.value) return
   if (!liveId.value.trim()) return
@@ -291,16 +466,24 @@ let reconnectTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
   tryConnect('retry')
 }, RECONNECT_MS)
 
+/** 断线暂停超过 20 分钟则落盘收尾 */
+let replayPauseTimer: ReturnType<typeof setInterval> | null = setInterval(checkReplayPauseTimeout, 30_000)
+
 onUnmounted(() => {
   window.removeEventListener('pagehide', flushDiskOnLeave)
   window.removeEventListener('beforeunload', flushDiskOnLeave)
   flushDiskOnLeave()
   setLikeSettleHandler(null)
   clearLikeBucket()
+  clearGiftBucket()
   stopSpeak()
   if (reconnectTimer) {
     clearInterval(reconnectTimer)
     reconnectTimer = null
+  }
+  if (replayPauseTimer) {
+    clearInterval(replayPauseTimer)
+    replayPauseTimer = null
   }
 })
 
@@ -314,10 +497,18 @@ watch(
         connectHint.value = c.replace(/^(error|douyin_error|pump_error):/, '')
       } else if (c === 'douyin_connected') {
         connectHint.value = ''
+        beginReplaySession()
       } else if (c === 'live_ended') {
-        connectHint.value = '直播已结束，将自动重连'
+        // 平台侧结束：暂停复盘，开播态下会自动重连
+        connectHint.value = wantConnect.value ? '直播已结束，将自动重连' : '直播已结束'
+        pauseReplaySession()
       } else if (c === 'douyin_closed') {
-        connectHint.value = wantConnect.value ? '连接断开，将自动重连' : '连接已断开'
+        if (wantConnect.value) {
+          connectHint.value = '连接断开，将自动重连'
+          pauseReplaySession()
+        } else {
+          connectHint.value = '已下播'
+        }
       } else if (c.startsWith('gift_hint:')) {
         connectHint.value = c.replace(/^gift_hint:/, '')
       } else if (c === 'gift_catalog') {
@@ -333,7 +524,10 @@ watch(
       }
       return
     }
-    if (event.type === 'room') return
+    if (event.type === 'room') {
+      replayRecorder.pushLiveEvent(event)
+      return
+    }
 
     // 收录礼物名，供规则页下拉精确选择
     if (event.type === 'gift' && event.gift_name) {
@@ -346,32 +540,20 @@ watch(
       saveGiftCatalog(giftCatalog.value)
     }
 
-    // 点赞：按「聚合秒数」固定窗口汇总，整窗结束再播报/整蛊
+    // 点赞：聚合窗结束再播报/整蛊
     if (event.type === 'like') {
       ingestLike(event)
       return
     }
 
-    // 语音播报（与整蛊规则独立）
-    void tryAnnounceEvent(event)
-
-    if (!prankMasterEnabled.value) return
-
-    const hits = matchRules(event, rules.value)
-    if (!hits.length) return
-
-    firedActions.value = [...firedActions.value, ...hits.map((h) => h.fired)].slice(-50)
-
-    // 异步执行效果，不阻塞后续事件匹配（不再弹窗，日志区高亮）
-    for (const hit of hits) {
-      void runRuleEffects(hit.rule, hit.times, hit.intervalSec, {
-        dryToast: (m) => onRuleToast(m),
-      }).catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err)
-        connectHint.value = `玩法执行失败：${msg}`
-        onRuleToast(msg)
-      })
+    // 礼物：连击结算后再播报/整蛊（避免一条礼触发多次）
+    if (event.type === 'gift') {
+      ingestGift(event)
+      return
     }
+
+    // 其它事件：立即播报 + 整蛊
+    onSettledLiveEvent(event)
   },
 )
 
@@ -384,6 +566,26 @@ function onRuleToast(msg: string, meta?: { durationMs?: number }) {
     at: Date.now(),
     durationMs: meta?.durationMs,
   }
+}
+
+/** 强制重载礼物目录（优先官方接口） */
+async function onRefreshGiftCatalog() {
+  try {
+    const { syncOfficialGiftsFromApi, loadStaticGifts } = await import('./lib/douyinGifts')
+    const res = await syncOfficialGiftsFromApi()
+    staticGifts.value = await loadStaticGifts()
+    if (!res.ok) onRuleToast(res.error || '礼物目录刷新失败')
+    else if (res.source === 'official') onRuleToast(`已从官方同步礼物（${res.count}）`)
+    else onRuleToast(`礼物目录已刷新（${staticGifts.value.length}）`)
+  } catch (e) {
+    onRuleToast(e instanceof Error ? e.message : '礼物目录刷新失败')
+  }
+}
+
+/** OBS 图层配置变更：启停服务并立即推送 */
+async function onOverlayChanged() {
+  await ensureOverlayServer()
+  pushOverlayState()
 }
 
 function persistLayout() {
@@ -442,7 +644,7 @@ async function onDouyinLogin(force = false) {
       showCookie.value = false
       let msg = res.reused ? '已复用本地登录态' : '登录成功，Cookie 已保存'
       if (roomState.value === 'connected' || roomState.value === 'connecting') {
-        msg += '；请断开后重新连接以生效'
+        msg += '；请下播后重新开播以生效'
       }
       connectHint.value = msg
     } else if (res.canceled) {
@@ -472,8 +674,8 @@ async function onExportConfig() {
     savePanelFonts({ ...panelFonts })
     const api = window.liveAssistant
     if (api?.exportDataZip) {
-      const { flushAllToDisk } = await import('./lib/diskSync')
-      await flushAllToDisk()
+      const { prepareDataPackageExport } = await import('./lib/dataPackage')
+      await prepareDataPackageExport()
       const res = await api.exportDataZip()
       if (res.canceled) return
       if (!res.ok) throw new Error(res.error || '导出失败')
@@ -494,6 +696,7 @@ async function onExportConfig() {
       <nav class="nav">
         <button type="button" :class="{ on: page === 'live' }" @click="page = 'live'">监听</button>
         <button type="button" :class="{ on: page === 'rules' }" @click="page = 'rules'">整蛊规则</button>
+        <button type="button" :class="{ on: page === 'replay' }" @click="page = 'replay'">复盘</button>
         <button type="button" :class="{ on: page === 'settings' }" @click="page = 'settings'">系统设置</button>
       </nav>
       <StatsBar
@@ -505,8 +708,10 @@ async function onExportConfig() {
         :like-total="likeTotal"
         :like-text="likeText"
         :show-clear="page === 'live'"
-        @clear="clearEvents"
+        :show-admin-warn="isAdmin === false"
+        @clear="onClearSession"
         @export-config="onExportConfig"
+        @relaunch-admin="onRelaunchAsAdmin"
       />
       <div v-if="page === 'live'" class="meta">
         <button
@@ -541,31 +746,23 @@ async function onExportConfig() {
           :disabled="roomState === 'connecting'"
           @click="onConnect"
         >
-          {{ roomState === 'connecting' ? '连接中…' : '连接' }}
+          {{ roomState === 'connecting' ? '开播中…' : '开播' }}
         </button>
-        <button v-else type="button" class="disconnect" @click="onDisconnect">断开</button>
+        <button v-else type="button" class="disconnect" @click="onDisconnect">下播</button>
         <div
           v-if="showRoomStatus"
           class="status"
-          :class="{ on: roomState === 'connected', wait: roomState === 'connecting' }"
+          :class="{
+            on: roomState === 'connected',
+            wait: roomState === 'connecting' || (wantConnect && roomState === 'disconnected'),
+            off: !wantConnect && roomState === 'disconnected',
+          }"
         >
           <i />
           {{ roomStatusText }}
         </div>
       </div>
     </header>
-
-    <div
-      v-if="isAdmin === false && !adminBannerDismissed"
-      class="admin-banner"
-      role="status"
-    >
-      <span>当前不是管理员权限，关闭进程 / 部分整蛊可能失败。</span>
-      <div class="admin-acts">
-        <button type="button" class="admin-go" @click="onRelaunchAsAdmin">以管理员重新启动</button>
-        <button type="button" class="admin-later" @click="dismissAdminBanner">稍后</button>
-      </div>
-    </div>
 
     <div v-if="page === 'live' && showCookie" class="cookie-box">
       <textarea
@@ -574,7 +771,7 @@ async function onExportConfig() {
         placeholder="浏览器打开 live.douyin.com 并登录 → F12 → Network 任意请求 → 复制 Cookie 整段粘贴到这里"
       />
       <p>
-        推荐用「扫码/手机登录」自动获取；手动粘贴后需断开再连接。礼物等完整事件通常需要登录态。
+        推荐用「扫码/手机登录」自动获取；手动粘贴后需下播再开播。礼物等完整事件通常需要登录态。
       </p>
     </div>
 
@@ -611,7 +808,7 @@ async function onExportConfig() {
           <Pane :size="layout.cols[2]" :min-size="16">
             <Splitpanes class="right-split" horizontal @resized="onRightRowsResized">
               <Pane :size="layout.rightRows[0]" :min-size="25">
-                <PrankStats :actions="firedActions" :rules="rules" />
+                <PrankStats :actions="firedActions" :rules="rules" :counts="ruleCounts" />
               </Pane>
               <Pane :size="layout.rightRows[1]" :min-size="18">
                 <PrankLog :actions="firedActions" />
@@ -623,11 +820,21 @@ async function onExportConfig() {
     </template>
 
     <main v-else-if="page === 'rules'" class="rules-page">
-      <RuleStudio v-model:rules="rules" :gift-options="giftOptions" @toast="onRuleToast" />
+      <RuleStudio
+        v-model:rules="rules"
+        :gift-options="giftOptions"
+        @toast="onRuleToast"
+        @overlay-changed="onOverlayChanged"
+        @refresh-gifts="onRefreshGiftCatalog"
+      />
+    </main>
+
+    <main v-else-if="page === 'replay'" class="rules-page">
+      <ReplayPage />
     </main>
 
     <main v-else class="rules-page">
-      <SettingsPage />
+      <SettingsPage @replay-config-changed="onReplayConfigChanged" />
     </main>
 
     <ActionToast :item="toast" @done="toast = null" />
@@ -641,45 +848,6 @@ async function onExportConfig() {
   flex-direction: column;
   gap: 14px;
   padding: 18px 20px 20px;
-}
-
-.admin-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px 16px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 180, 60, 0.55);
-  background: rgba(255, 138, 61, 0.16);
-  color: #ffd7a8;
-  font-size: 13px;
-}
-
-.admin-acts {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.admin-go {
-  border: 0;
-  border-radius: 8px;
-  padding: 6px 12px;
-  background: linear-gradient(135deg, var(--accent), #ffb15a);
-  color: #1a120c;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.admin-later {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 12px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
 }
 
 .top {
@@ -841,6 +1009,8 @@ async function onExportConfig() {
   background: rgba(255, 255, 255, 0.03);
   color: var(--muted);
   font-size: 13px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .status i {
@@ -858,6 +1028,11 @@ async function onExportConfig() {
 .status.on i {
   background: var(--ok);
   box-shadow: 0 0 0 4px rgba(111, 207, 151, 0.15);
+}
+
+.status.off i {
+  background: #6b635c;
+  box-shadow: none;
 }
 
 .banner {

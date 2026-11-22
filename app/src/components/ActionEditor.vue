@@ -8,6 +8,7 @@ import {
   type ActionCategory,
   type MouseOp,
   type OtherOp,
+  type RepeatCountMode,
   type RuleAction,
   type SoundMode,
 } from '../lib/prank/model'
@@ -81,9 +82,39 @@ const mouseOpModel = computed({
   },
 })
 
+const keyRepeatModeModel = computed({
+  get: () => (draft.keyRepeatMode || 'fixed') as string,
+  set: (v: string) => {
+    draft.keyRepeatMode = v as RepeatCountMode
+  },
+})
+
+const mouseClickModeModel = computed({
+  get: () => (draft.mouseClickMode || 'fixed') as string,
+  set: (v: string) => {
+    draft.mouseClickMode = v as RepeatCountMode
+  },
+})
+
+const isMouseClick = computed(
+  () =>
+    draft.mouseOp === 'click_left' ||
+    draft.mouseOp === 'click_right' ||
+    draft.mouseOp === 'click_middle',
+)
+
 function setCategory(cat: ActionCategory) {
   draft.category = cat
   if (cat === 'other' && !draft.otherOp) draft.otherOp = 'toast'
+  if (cat === 'keyboard') {
+    if (!draft.keyRepeatMode) draft.keyRepeatMode = 'fixed'
+    if (draft.keyRepeat == null || Number.isNaN(Number(draft.keyRepeat))) draft.keyRepeat = 1
+    if (draft.keyRepeatMin == null || Number.isNaN(Number(draft.keyRepeatMin))) draft.keyRepeatMin = 1
+    if (draft.keyRepeatMax == null || Number.isNaN(Number(draft.keyRepeatMax))) draft.keyRepeatMax = 3
+    if (draft.keyRepeatProbability == null || Number.isNaN(Number(draft.keyRepeatProbability))) {
+      draft.keyRepeatProbability = 100
+    }
+  }
   if (cat === 'mouse') {
     if (!draft.mouseOp) draft.mouseOp = 'click_left'
     if (draft.mouseX == null || Number.isNaN(Number(draft.mouseX))) draft.mouseX = 0
@@ -92,6 +123,19 @@ function setCategory(cat: ActionCategory) {
     if (draft.mouseY2 == null || Number.isNaN(Number(draft.mouseY2))) draft.mouseY2 = 300
     if (draft.mouseDurationSec == null || Number.isNaN(Number(draft.mouseDurationSec))) draft.mouseDurationSec = 2
     if (draft.mouseSpinTurns == null || Number.isNaN(Number(draft.mouseSpinTurns))) draft.mouseSpinTurns = 4
+    if (draft.mouseHoldSec == null || Number.isNaN(Number(draft.mouseHoldSec))) draft.mouseHoldSec = 1
+    if (draft.mouseMovePx == null || Number.isNaN(Number(draft.mouseMovePx))) draft.mouseMovePx = 200
+    if (draft.mouseMoveMs == null || Number.isNaN(Number(draft.mouseMoveMs))) draft.mouseMoveMs = 500
+    if (!draft.mouseClickMode) draft.mouseClickMode = 'fixed'
+    if (draft.mouseClickCount == null || Number.isNaN(Number(draft.mouseClickCount))) draft.mouseClickCount = 1
+    if (draft.mouseClickMin == null || Number.isNaN(Number(draft.mouseClickMin))) draft.mouseClickMin = 1
+    if (draft.mouseClickMax == null || Number.isNaN(Number(draft.mouseClickMax))) draft.mouseClickMax = 3
+    if (draft.mouseClickIntervalSec == null || Number.isNaN(Number(draft.mouseClickIntervalSec))) {
+      draft.mouseClickIntervalSec = 0.1
+    }
+    if (draft.mouseClickProbability == null || Number.isNaN(Number(draft.mouseClickProbability))) {
+      draft.mouseClickProbability = 100
+    }
     if (draft.scrollDelta == null || Number.isNaN(Number(draft.scrollDelta))) draft.scrollDelta = -120
   }
   if (cat === 'sound' && !draft.soundMode) draft.soundMode = 'file'
@@ -250,20 +294,57 @@ function selectOtherOp(op: OtherOp) {
               @update:model-value="(v) => (draft.keys = v)"
             />
           </label>
-          <div class="row3">
+          <label>
+            <span>持续时长(秒)</span>
+            <input v-model.number="draft.keyHoldSec" type="number" min="0" step="0.05" />
+          </label>
+          <label>
+            <span>执行次数</span>
+            <DarkSelect
+              v-model="keyRepeatModeModel"
+              :options="[
+                { value: 'fixed', label: '固定次数' },
+                { value: 'random', label: '随机次数' },
+              ]"
+            />
+          </label>
+          <div v-if="(draft.keyRepeatMode || 'fixed') === 'fixed'" class="row2">
             <label>
-              <span>持续时长(秒)</span>
-              <input v-model.number="draft.keyHoldSec" type="number" min="0" step="0.05" />
-            </label>
-            <label>
-              <span>执行次数</span>
-              <input v-model.number="draft.keyRepeat" type="number" min="1" step="1" />
+              <span>次数</span>
+              <input v-model.number="draft.keyRepeat" type="number" min="1" max="99" step="1" />
             </label>
             <label>
               <span>间隔(秒)</span>
               <input v-model.number="draft.keyIntervalSec" type="number" min="0" step="0.05" />
             </label>
           </div>
+          <div v-else class="row3">
+            <label>
+              <span>最少</span>
+              <input v-model.number="draft.keyRepeatMin" type="number" min="1" max="99" step="1" />
+            </label>
+            <label>
+              <span>最多</span>
+              <input v-model.number="draft.keyRepeatMax" type="number" min="1" max="99" step="1" />
+            </label>
+            <label>
+              <span>间隔(秒)</span>
+              <input v-model.number="draft.keyIntervalSec" type="number" min="0" step="0.05" />
+            </label>
+          </div>
+          <label>
+            <span>触发概率(%)</span>
+            <input
+              v-model.number="draft.keyRepeatProbability"
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+            />
+          </label>
+          <p class="hint">
+            先确定次数，再按概率决定是否执行（100=必触发，50=约一半会跳过）。持续时长=按住多久。
+          </p>
         </section>
 
         <!-- 鼠标 -->
@@ -276,7 +357,14 @@ function selectOtherOp(op: OtherOp) {
                 { value: 'click_left', label: '左键单击' },
                 { value: 'click_right', label: '右键单击' },
                 { value: 'click_middle', label: '中键单击' },
+                { value: 'hold_left', label: '左键长按' },
+                { value: 'hold_right', label: '右键长按' },
+                { value: 'hold_middle', label: '中键长按' },
                 { value: 'move', label: '移动到指定位置' },
+                { value: 'move_up', label: '向上移动' },
+                { value: 'move_down', label: '向下移动' },
+                { value: 'move_left', label: '向左移动' },
+                { value: 'move_right', label: '向右移动' },
                 { value: 'dizzy', label: '天旋地转（螺旋移动）' },
                 { value: 'scroll', label: '滚轮' },
               ]"
@@ -323,8 +411,55 @@ function selectOtherOp(op: OtherOp) {
               </label>
             </div>
             <p class="hint">
-              光标会从起点螺旋晃到终点。起点填 0,0 表示从当前位置开始。圈数越大越晕。
+              相对位移螺旋（游戏可读）。起点 0,0 = 当前位置。圈数越大越晕。
             </p>
+          </template>
+
+          <template
+            v-else-if="
+              draft.mouseOp === 'move_up' ||
+              draft.mouseOp === 'move_down' ||
+              draft.mouseOp === 'move_left' ||
+              draft.mouseOp === 'move_right'
+            "
+          >
+            <div class="row2">
+              <label>
+                <span>移动距离（相对量）</span>
+                <input v-model.number="draft.mouseMovePx" type="number" min="1" max="50000" step="1" />
+              </label>
+              <label>
+                <span>移动耗时（毫秒）</span>
+                <input v-model.number="draft.mouseMoveMs" type="number" min="0" max="60000" step="10" />
+              </label>
+            </div>
+            <p class="hint">
+              用相对位移注入（游戏镜头/视角才能读到；绝对挪光标多数游戏无效）。耗时 0 = 瞬间完成。
+            </p>
+          </template>
+
+          <template
+            v-else-if="
+              draft.mouseOp === 'hold_left' ||
+              draft.mouseOp === 'hold_right' ||
+              draft.mouseOp === 'hold_middle'
+            "
+          >
+            <div class="row2">
+              <label>
+                <span>屏幕 X（左）</span>
+                <input v-model.number="draft.mouseX" type="number" step="1" />
+              </label>
+              <label>
+                <span>屏幕 Y（上）</span>
+                <input v-model.number="draft.mouseY" type="number" step="1" />
+              </label>
+            </div>
+            <label>
+              <span>长按时长（秒）</span>
+              <input v-model.number="draft.mouseHoldSec" type="number" min="0.05" max="120" step="0.1" />
+            </label>
+            <p class="hint">先移到坐标再按下不放；填 0,0 表示在当前位置长按。</p>
           </template>
 
           <template v-else>
@@ -338,11 +473,90 @@ function selectOtherOp(op: OtherOp) {
                 <input v-model.number="draft.mouseY" type="number" step="1" />
               </label>
             </div>
+            <template v-if="isMouseClick">
+              <label>
+                <span>单击次数</span>
+                <DarkSelect
+                  v-model="mouseClickModeModel"
+                  :options="[
+                    { value: 'fixed', label: '固定次数' },
+                    { value: 'random', label: '随机次数' },
+                  ]"
+                />
+              </label>
+              <div v-if="(draft.mouseClickMode || 'fixed') === 'fixed'" class="row2">
+                <label>
+                  <span>次数</span>
+                  <input v-model.number="draft.mouseClickCount" type="number" min="1" max="99" step="1" />
+                </label>
+                <label>
+                  <span>间隔(秒)</span>
+                  <input
+                    v-model.number="draft.mouseClickIntervalSec"
+                    type="number"
+                    min="0"
+                    step="0.05"
+                  />
+                </label>
+              </div>
+              <div v-else class="row3">
+                <label>
+                  <span>最少</span>
+                  <input v-model.number="draft.mouseClickMin" type="number" min="1" max="500" step="1" />
+                </label>
+                <label>
+                  <span>最多</span>
+                  <input v-model.number="draft.mouseClickMax" type="number" min="1" max="500" step="1" />
+                </label>
+                <label>
+                  <span>间隔(秒)</span>
+                  <input
+                    v-model.number="draft.mouseClickIntervalSec"
+                    type="number"
+                    min="0"
+                    step="0.05"
+                  />
+                </label>
+              </div>
+              <label>
+                <span>触发概率(%)</span>
+                <input
+                  v-model.number="draft.mouseClickProbability"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                />
+              </label>
+              <label>
+                <span>附带播报（可选，先喊再点）</span>
+                <textarea
+                  v-model="draft.ttsText"
+                  rows="2"
+                  placeholder="抓鸭子，抓几只，抓【次数】只，【结果】"
+                />
+              </label>
+              <div class="row2">
+                <label>
+                  <span>语速 (0.5~2)</span>
+                  <input v-model.number="draft.ttsRate" type="number" min="0.5" max="2" step="0.1" />
+                </label>
+                <label>
+                  <span>音量 (0~3，&gt;1 更响)</span>
+                  <input v-model.number="draft.ttsVolume" type="number" min="0" max="3" step="0.1" />
+                </label>
+              </div>
+              <p class="hint">
+                【次数】= 上面随机/固定次数；【结果】= 抓到了 / 没抓到（由概率决定）。没抓到时只播报、不点击。
+              </p>
+            </template>
             <p class="hint">
               {{
                 draft.mouseOp === 'move'
                   ? '移动到该屏幕坐标。'
-                  : '在该坐标点击；填 0,0 表示在当前位置点击。'
+                  : isMouseClick
+                    ? '先抽次数，再按概率决定是否点击（100=必点）。坐标 0,0=当前位置。'
+                    : '在该坐标点击；填 0,0 表示在当前位置点击。'
               }}
             </p>
           </template>
@@ -381,14 +595,14 @@ function selectOtherOp(op: OtherOp) {
           </template>
           <template v-else>
             <p class="hint">
-              音色在「系统设置 → TTS 语音」配置。此处只填要读的文案。
+              音色在「系统设置 → TTS 语音」配置。玩法选「注入」时可用【次数】【数量】【结果】（抓到了/没抓到）。
             </p>
             <label>
               <span>朗读文本</span>
               <textarea
                 v-model="draft.ttsText"
                 rows="3"
-                placeholder="例如：有人点赞了，主播喝一口水"
+                placeholder="抓鸭子，抓几只，抓【次数】只，【结果】"
               />
             </label>
             <div class="row2">

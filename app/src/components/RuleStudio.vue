@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ActionEditor from './ActionEditor.vue'
+import DarkSelect from './DarkSelect.vue'
+import ObsOverlayPanel from './ObsOverlayPanel.vue'
 import {
   TRIGGER_OPTIONS,
   actionSummary,
@@ -8,6 +10,7 @@ import {
   createEmptyRule,
   newActionId,
   type EffectMode,
+  type EffectTimesMode,
   type PrankRule,
   type RuleAction,
   type TriggerKind,
@@ -16,6 +19,7 @@ import { loadDefaultRules } from '../lib/prank/migrate'
 import { runRuleEffects, testAction } from '../lib/prank/actionRunner'
 import { giftFallbackIcon } from '../lib/douyinEmoji'
 import { usePrankMaster } from '../composables/usePrankMaster'
+import type { OverlaySettings } from '../lib/prank/overlaySettings'
 
 const props = defineProps<{
   /** 全量/本场礼物目录，供触发条件点选（名称精确匹配） */
@@ -32,9 +36,29 @@ const rules = defineModel<PrankRule[]>('rules', { required: true })
 
 const emit = defineEmits<{
   toast: [string]
+  overlayChanged: [OverlaySettings]
+  /** 强制重载礼物目录（抖钻/图标） */
+  refreshGifts: []
 }>()
 
+const giftCatalogRefreshing = ref(false)
+
+async function onRefreshGiftCatalog() {
+  if (giftCatalogRefreshing.value) return
+  giftCatalogRefreshing.value = true
+  try {
+    emit('refreshGifts')
+  } finally {
+    // App 侧异步加载，稍后再解锁按钮
+    window.setTimeout(() => {
+      giftCatalogRefreshing.value = false
+    }, 800)
+  }
+}
+
 const { prankMasterEnabled } = usePrankMaster()
+/** 玩法列表 | OBS图层 */
+const studioTab = ref<'rules' | 'overlay'>('rules')
 
 const selectedId = ref(rules.value[0]?.id || '')
 const editorOpen = ref(false)
@@ -73,8 +97,56 @@ watch(
 const current = computed(() => rules.value.find((r) => r.id === selectedId.value) || null)
 
 const giftFilter = ref('')
+/** 抖钻区间筛选；空=不限 */
+const giftDiamondRange = ref('')
+const giftDiamondRangeOptions = [
+  { value: '', label: '全部价值' },
+  { value: '1-20', label: '1~20' },
+  { value: '21-50', label: '21~50' },
+  { value: '51-100', label: '51~100' },
+  { value: '100-500', label: '100~500' },
+  { value: '501-1000', label: '501~1000' },
+  { value: '1000+', label: '1000+' },
+]
 
-/** 礼物点选列表；无关键词时优先面板/本场，搜索时查全库 */
+function matchDiamondRange(diamond: number, range: string): boolean {
+  if (!range) return true
+  const n = Math.max(0, Number(diamond) || 0)
+  switch (range) {
+    case '1-20':
+      return n >= 1 && n <= 20
+    case '21-50':
+      return n >= 21 && n <= 50
+    case '51-100':
+      return n >= 51 && n <= 100
+    case '100-500':
+      return n >= 100 && n <= 500
+    case '501-1000':
+      return n >= 501 && n <= 1000
+    case '1000+':
+      return n >= 1000
+    default:
+      return true
+  }
+}
+
+/** 排序：本场收到过 → 面板常见 → 其它；同组内按次数/价值 */
+function sortGiftCards(
+  list: { name: string; icon: string; count: number; panel: boolean; diamond: number }[],
+) {
+  return [...list].sort((a, b) => {
+    const aRecv = (a.count || 0) > 0 ? 1 : 0
+    const bRecv = (b.count || 0) > 0 ? 1 : 0
+    if (aRecv !== bRecv) return bRecv - aRecv
+    if (aRecv && bRecv) return (b.count || 0) - (a.count || 0)
+    const aPanel = a.panel ? 1 : 0
+    const bPanel = b.panel ? 1 : 0
+    if (aPanel !== bPanel) return bPanel - aPanel
+    return a.diamond - b.diamond || a.name.localeCompare(b.name, 'zh')
+  })
+}
+
+/** 礼物点选列表；无关键词时优先面板/本场，搜索时查全库；可按抖钻区间筛 */
 const giftSelectOptions = computed(() => {
   const seen = new Set<string>()
   const out: { name: string; icon: string; count: number; panel: boolean; diamond: number }[] = []
@@ -95,14 +167,22 @@ const giftSelectOptions = computed(() => {
     out.unshift({ name: cur, icon: giftFallbackIcon(cur), count: 0, panel: false, diamond: 0 })
   }
   const q = giftFilter.value.trim()
-  if (q) return out.filter((g) => g.name.includes(q))
-  // 无搜索：本场收到过 + 面板常见礼物，避免一次渲染上千个
-  const received = out.filter((g) => g.count > 0)
-  const receivedNames = new Set(received.map((g) => g.name))
-  const panel = out
-    .filter((g) => g.panel && !receivedNames.has(g.name))
-    .sort((a, b) => a.diamond - b.diamond || a.name.localeCompare(b.name, 'zh'))
-  return [...received, ...panel]
+  const range = giftDiamondRange.value
+  let list: typeof out
+  if (q) {
+    list = out.filter((g) => g.name.includes(q))
+  } else if (range) {
+    // 选了区间：从全库筛，避免只看到面板低价礼物
+    list = [...out]
+  } else {
+    // 无搜索：本场收到过 + 面板常见礼物，避免一次渲染上千个
+    const received = out.filter((g) => g.count > 0)
+    const receivedNames = new Set(received.map((g) => g.name))
+    const panel = out.filter((g) => g.panel && !receivedNames.has(g.name))
+    list = [...received, ...panel]
+  }
+  if (range) list = list.filter((g) => matchDiamondRange(g.diamond, range))
+  return sortGiftCards(list)
 })
 
 const selectedGift = computed(() => {
@@ -112,6 +192,7 @@ const selectedGift = computed(() => {
   return {
     name,
     icon: hit?.icon || giftFallbackIcon(name),
+    diamond: hit?.diamond || 0,
   }
 })
 
@@ -124,6 +205,28 @@ function pickGift(name: string) {
 
 function giftIconOf(name: string, icon?: string) {
   return icon || giftFallbackIcon(name)
+}
+
+/** 玩法列表侧栏：礼物相关触发显示小图标 */
+function sidebarGiftIcon(rule: PrankRule): string | null {
+  const kind = rule.trigger?.kind
+  if (kind !== 'gift' && kind !== 'gift_value' && kind !== 'gift_value_sum') return null
+  const name = (rule.trigger.giftName || '').trim()
+  if (name) {
+    const hit = (props.giftOptions || []).find((g) => g.name === name)
+    return giftIconOf(name, hit?.icon)
+  }
+  // 价值类 / 未指定具体礼物：通用礼物图
+  return '/gifts/carnival.svg'
+}
+
+function sidebarGiftTitle(rule: PrankRule): string {
+  const kind = rule.trigger?.kind
+  const name = (rule.trigger.giftName || '').trim()
+  if (name) return name
+  if (kind === 'gift_value') return '礼物价值'
+  if (kind === 'gift_value_sum') return '累计礼物价值'
+  return '礼物'
 }
 
 function select(id: string) {
@@ -326,6 +429,10 @@ function effectModeOf(rule: PrankRule): EffectMode {
   return rule.effectMode || 'sequential'
 }
 
+function effectTimesModeOf(rule: PrankRule): EffectTimesMode {
+  return rule.effectTimesMode === 'bind' ? 'bind' : 'repeat'
+}
+
 function categoryLabel(cat: string) {
   const map: Record<string, string> = {
     keyboard: '键盘',
@@ -347,18 +454,41 @@ function categoryLabel(cat: string) {
   <section class="studio">
     <header class="toolbar">
       <div class="tabs">
-        <span class="on">玩法列表</span>
-        <label class="master" :class="{ off: !prankMasterEnabled }" title="关闭后所有玩法都不会被直播事件触发（测试按钮仍可用）">
+        <button type="button" :class="{ on: studioTab === 'rules' }" @click="studioTab = 'rules'">
+          玩法列表
+        </button>
+        <button
+          type="button"
+          :class="{ on: studioTab === 'overlay' }"
+          @click="studioTab = 'overlay'"
+        >
+          OBS图层
+        </button>
+        <label
+          v-if="studioTab === 'rules'"
+          class="master"
+          :class="{ off: !prankMasterEnabled }"
+          title="关闭后所有玩法都不会被直播事件触发（测试按钮仍可用）"
+        >
           <input v-model="prankMasterEnabled" type="checkbox" />
           <span>开启整蛊</span>
         </label>
       </div>
       <div class="ops">
-        <button type="button" @click="restoreDefaults">恢复默认</button>
+        <button v-if="studioTab === 'rules'" type="button" @click="restoreDefaults">恢复默认</button>
       </div>
     </header>
 
-    <div class="body">
+    <ObsOverlayPanel
+      v-if="studioTab === 'overlay'"
+      class="overlay-host"
+      :rules="rules"
+      :gift-options="giftOptions"
+      @hint="(m) => emit('toast', m)"
+      @changed="(s) => emit('overlayChanged', s)"
+    />
+
+    <div v-else class="body">
       <aside class="side">
         <div
           v-for="(r, i) in rules"
@@ -389,6 +519,15 @@ function categoryLabel(cat: string) {
             @dragend="onDragEnd"
             @click.stop
           >⠿</span>
+          <img
+            v-if="sidebarGiftIcon(r)"
+            class="rule-gift-ico"
+            :src="sidebarGiftIcon(r)!"
+            :alt="sidebarGiftTitle(r)"
+            :title="sidebarGiftTitle(r)"
+            referrerpolicy="no-referrer"
+            loading="lazy"
+          />
           <span class="name">{{ r.name || `玩法${i + 1}` }}</span>
           <span class="row-ops" @click.stop>
             <button type="button" title="删除" @click="removeRule(r.id)">×</button>
@@ -439,13 +578,23 @@ function categoryLabel(cat: string) {
           </div>
 
           <div v-if="current.trigger.kind === 'chat'" class="params">
-            <label>
+            <label class="full">
               <span>关键词（逗号分隔）</span>
               <input
                 :value="keywordsText(current)"
                 @input="updateKeywords(current, ($event.target as HTMLInputElement).value)"
               />
             </label>
+            <div class="row-meta">
+              <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                <span>同用户冷却(秒)</span>
+                <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+              </label>
+              <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                <span>规则冷却(秒)</span>
+                <input v-model.number="current.cooldownSec" type="number" min="0" />
+              </label>
+            </div>
           </div>
 
           <div v-else-if="current.trigger.kind === 'gift'" class="params gift-params">
@@ -461,6 +610,7 @@ function categoryLabel(cat: string) {
                   <div class="sel-text">
                     <small>已选触发礼物（精确匹配）</small>
                     <strong>{{ selectedGift.name }}</strong>
+                    <span class="sel-diamond">{{ selectedGift.diamond || 0 }} 抖钻</span>
                   </div>
                   <button type="button" class="any-gift" @click="pickGift('')">改为任意礼物</button>
                 </template>
@@ -473,11 +623,28 @@ function categoryLabel(cat: string) {
               </div>
               <div class="gift-picker-head">
                 <span>点选下方礼物设为触发条件</span>
-                <input
-                  v-model="giftFilter"
-                  class="gift-filter"
-                  placeholder="搜索全部礼物（约1500+）"
-                />
+                <div class="gift-head-filters">
+                  <input
+                    v-model="giftFilter"
+                    class="gift-filter"
+                    placeholder="搜索全部礼物（约1500+）"
+                  />
+                  <DarkSelect
+                    v-model="giftDiamondRange"
+                    class="gift-range"
+                    :options="giftDiamondRangeOptions"
+                    placeholder="全部价值"
+                  />
+                  <button
+                    type="button"
+                    class="gift-refresh"
+                    :disabled="giftCatalogRefreshing"
+                    title="从本地目录重新加载礼物价值与图标"
+                    @click="onRefreshGiftCatalog"
+                  >
+                    {{ giftCatalogRefreshing ? '刷新中' : '刷新' }}
+                  </button>
+                </div>
               </div>
               <div class="gift-grid scroll">
                 <button
@@ -486,7 +653,7 @@ function categoryLabel(cat: string) {
                   type="button"
                   class="gift-card"
                   :class="{ on: current.trigger.giftName === g.name }"
-                  :title="`选择「${g.name}」`"
+                  :title="`选择「${g.name}」· ${g.diamond || 0} 抖钻`"
                   @click="pickGift(g.name)"
                 >
                   <img
@@ -496,76 +663,198 @@ function categoryLabel(cat: string) {
                     referrerpolicy="no-referrer"
                     loading="lazy"
                   />
-                  <span class="gift-name">{{ g.name }}</span>
+                  <span class="gift-meta">
+                    <span class="gift-name">{{ g.name }}</span>
+                    <span class="gift-diamond">{{ g.diamond || 0 }} 抖钻</span>
+                  </span>
                 </button>
                 <p v-if="!giftSelectOptions.length" class="hint-inline">
-                  {{ giftFilter.trim() ? '没有匹配的礼物名，换个关键词试试' : '礼物目录加载中…' }}
+                  {{
+                    giftFilter.trim() || giftDiamondRange
+                      ? '没有匹配的礼物，换个关键词或价值区间试试'
+                      : '礼物目录加载中…'
+                  }}
                 </p>
               </div>
             </div>
-            <label class="field-count">
-              <span>数量 ≥</span>
-              <input v-model.number="current.trigger.giftCount" type="number" min="1" />
-            </label>
+            <div class="trigger-compact">
+              <div class="row-meta">
+                <span class="gc-label">数量</span>
+                <div class="gc-modes">
+                  <button
+                    type="button"
+                    class="gc-btn"
+                    :class="{ on: (current.trigger.giftCountMode || 'gte') === 'eq' }"
+                    @click="current.trigger.giftCountMode = 'eq'"
+                  >
+                    等于
+                  </button>
+                  <button
+                    type="button"
+                    class="gc-btn"
+                    :class="{ on: (current.trigger.giftCountMode || 'gte') === 'gte' }"
+                    @click="current.trigger.giftCountMode = 'gte'"
+                  >
+                    达到
+                  </button>
+                </div>
+                <input
+                  v-model.number="current.trigger.giftCount"
+                  class="gc-num"
+                  type="number"
+                  min="1"
+                />
+                <span class="gc-hint">
+                  {{
+                    (current.trigger.giftCountMode || 'gte') === 'eq'
+                      ? '恰好等于触发 1 次'
+                      : '凑满触发并重新计数'
+                  }}
+                </span>
+                <span class="meta-sep" aria-hidden="true" />
+                <label
+                  v-if="(current.trigger.giftCountMode || 'gte') === 'gte'"
+                  class="field"
+                  title="「达到」一次凑满多次时，每次执行之间的间隔"
+                >
+                  <span>多次触发间隔(秒)</span>
+                  <input
+                    v-model.number="current.trigger.multiIntervalSec"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                  />
+                </label>
+                <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                  <span>同用户冷却(秒)</span>
+                  <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+                </label>
+                <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                  <span>规则冷却(秒)</span>
+                  <input v-model.number="current.cooldownSec" type="number" min="0" />
+                </label>
+              </div>
+            </div>
           </div>
 
           <div v-else-if="current.trigger.kind === 'gift_value' || current.trigger.kind === 'gift_value_sum'" class="params">
-            <label>
+            <label class="full">
               <span>{{ current.trigger.kind === 'gift_value_sum' ? '累计价值 ≥' : '单次价值 ≥' }}</span>
               <input v-model.number="current.trigger.minValue" type="number" min="1" />
             </label>
+            <div class="row-meta">
+              <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                <span>同用户冷却(秒)</span>
+                <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+              </label>
+              <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                <span>规则冷却(秒)</span>
+                <input v-model.number="current.cooldownSec" type="number" min="0" />
+              </label>
+            </div>
           </div>
 
           <div v-else-if="current.trigger.kind === 'like'" class="params">
-            <label>
-              <span>点赞数 ≥</span>
+            <label class="full" title="按用户累计点赞，凑满后触发一次并重新从 0 计">
+              <span>每累计点赞数</span>
               <input v-model.number="current.trigger.likeCount" type="number" min="1" />
             </label>
+            <p class="hint-inline">按用户累计：凑满 N 次触发一次，余数继续累计（与礼物「达到」相同）。</p>
+            <div class="row-meta">
+              <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                <span>同用户冷却(秒)</span>
+                <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+              </label>
+              <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                <span>规则冷却(秒)</span>
+                <input v-model.number="current.cooldownSec" type="number" min="0" />
+              </label>
+            </div>
           </div>
 
           <div v-else-if="current.trigger.kind === 'like_total'" class="params">
-            <label>
+            <label class="full">
               <span>房间点赞总数 ≥</span>
               <input v-model.number="current.trigger.likeTotal" type="number" min="1" />
             </label>
+            <div class="row-meta">
+              <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                <span>同用户冷却(秒)</span>
+                <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+              </label>
+              <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                <span>规则冷却(秒)</span>
+                <input v-model.number="current.cooldownSec" type="number" min="0" />
+              </label>
+            </div>
           </div>
 
-          <div class="params extras">
-            <label class="check full">
-              <input v-model="current.trigger.multiByGiftCount" type="checkbox" />
-              根据礼物数量触发多次
-            </label>
-            <label class="field">
-              <span>间隔(秒)</span>
-              <input v-model.number="current.trigger.multiIntervalSec" type="number" min="0" step="0.1" />
-            </label>
-            <label class="field">
-              <span>同用户冷却(秒)</span>
-              <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
-            </label>
-            <label class="field">
-              <span>规则冷却(秒)</span>
-              <input v-model.number="current.cooldownSec" type="number" min="0" />
-            </label>
+          <div v-else class="params">
+            <div class="row-meta">
+              <label class="field" title="同一用户再次触发本玩法前需等待的秒数，0=不限制">
+                <span>同用户冷却(秒)</span>
+                <input v-model.number="current.trigger.userCooldownSec" type="number" min="0" />
+              </label>
+              <label class="field" title="本玩法全局冷却，任意用户触发后需等待的秒数，0=不限制">
+                <span>规则冷却(秒)</span>
+                <input v-model.number="current.cooldownSec" type="number" min="0" />
+              </label>
+            </div>
           </div>
         </fieldset>
 
         <fieldset class="box">
           <legend>触发效果</legend>
-          <div class="modes">
-            <label class="tg" :class="{ on: effectModeOf(current) === 'sequential' }">
+          <div class="modes" title="仅控制下方效果列表如何执行；与礼物连送排队无关">
+            <label class="tg" :class="{ on: effectModeOf(current) === 'sequential' }" title="按列表从上到下依次执行">
               <input v-model="current.effectMode" type="radio" value="sequential" />
               顺序触发
             </label>
-            <label class="tg" :class="{ on: effectModeOf(current) === 'parallel' }">
+            <label class="tg" :class="{ on: effectModeOf(current) === 'parallel' }" title="列表中的效果同时执行">
               <input v-model="current.effectMode" type="radio" value="parallel" />
               同时触发
             </label>
-            <label class="tg" :class="{ on: effectModeOf(current) === 'random' }">
+            <label class="tg" :class="{ on: effectModeOf(current) === 'random' }" title="每次从列表中随机选一条执行">
               <input v-model="current.effectMode" type="radio" value="random" />
               随机触发
             </label>
           </div>
+          <div class="modes" style="margin-top: 8px" title="礼物连送 / 弹幕抓N只 算出的次数怎么用">
+            <label
+              class="tg"
+              :class="{ on: effectTimesModeOf(current) === 'repeat' }"
+              title="整套效果执行 N 遍（旧行为）"
+            >
+              <input
+                type="radio"
+                name="effectTimesMode"
+                value="repeat"
+                :checked="effectTimesModeOf(current) === 'repeat'"
+                @change="current.effectTimesMode = 'repeat'"
+              />
+              重复整套
+            </label>
+            <label
+              class="tg"
+              :class="{ on: effectTimesModeOf(current) === 'bind' }"
+              title="只跑一轮：按键鼠上的随机次数+概率掷一次，TTS/弹窗可用【次数】【结果】"
+            >
+              <input
+                type="radio"
+                name="effectTimesMode"
+                value="bind"
+                :checked="effectTimesModeOf(current) === 'bind'"
+                @change="current.effectTimesMode = 'bind'"
+              />
+              注入（抓鸭子）
+            </label>
+          </div>
+          <p class="hint-inline">
+            「注入」适合抓鸭子：左键选随机次数+触发概率，附带播报写「抓鸭子，抓几只，抓【次数】只，【结果】」——抓到了才连点，没抓到只喊。次数来自你配的随机范围，不跟礼物个数。
+          </p>
+          <p class="hint-inline">
+            效果列表执行方式见上。本玩法执行中再次触发会排队，等当前这次整段跑完再开下一次。
+          </p>
 
           <div class="effect-list">
             <div
@@ -639,12 +928,29 @@ function categoryLabel(cat: string) {
 .tabs {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
-.tabs .on {
+.tabs > button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
   font-size: 14px;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tabs > button.on {
   font-weight: 600;
+  color: var(--accent-2);
+  background: rgba(255, 138, 61, 0.14);
+}
+
+.overlay-host {
+  flex: 1;
+  min-height: 0;
 }
 
 .master {
@@ -656,6 +962,7 @@ function categoryLabel(cat: string) {
   cursor: pointer;
   user-select: none;
   font-weight: 500;
+  margin-left: 6px;
 }
 
 .master input {
@@ -754,6 +1061,19 @@ function categoryLabel(cat: string) {
 
 .grip:active {
   cursor: grabbing;
+}
+
+.rule-gift-ico {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.item.off .rule-gift-ico {
+  opacity: 0.4;
 }
 
 .name {
@@ -941,6 +1261,13 @@ function categoryLabel(cat: string) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+}
+
+.params > .full {
+  display: grid;
+  gap: 4px;
+  width: 100%;
 }
 
 .params.gift-params {
@@ -948,15 +1275,116 @@ function categoryLabel(cat: string) {
   align-items: stretch;
 }
 
-.field-count {
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted);
-  max-width: 200px;
+.trigger-compact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
 }
 
-.field-count input,
+.row-meta {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.gc-label {
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.gc-modes {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.gc-btn {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.gc-btn.on {
+  color: var(--accent-2);
+  border-color: rgba(255, 138, 61, 0.55);
+  background: rgba(255, 138, 61, 0.16);
+  font-weight: 600;
+}
+
+.gc-num {
+  width: 64px !important;
+  max-width: 64px;
+  flex: 0 0 64px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.gc-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.meta-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--line);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+.row-meta .field {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  width: auto;
+  min-width: 0;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.row-meta .field > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.row-meta .field input {
+  width: 56px;
+  flex: 0 0 56px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  outline: none;
+  text-align: right;
+}
+
 .field input {
   width: 100%;
   min-width: 0;
@@ -970,22 +1398,7 @@ function categoryLabel(cat: string) {
 }
 
 .params.extras {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px 12px;
-  align-items: end;
-}
-
-.params.extras .check.full {
-  grid-column: 1 / -1;
-}
-
-.params.extras .field {
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted);
-  min-width: 0;
+  display: none;
 }
 
 .gift-picker {
@@ -1000,13 +1413,27 @@ function categoryLabel(cat: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
   font-size: 12px;
   color: var(--muted);
 }
 
+.gift-picker-head > span {
+  flex: 1 1 auto;
+  min-width: 12em;
+  white-space: nowrap;
+}
+
+.gift-head-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .gift-filter {
-  width: 140px;
+  width: 200px;
+  flex: 0 0 200px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
@@ -1014,6 +1441,38 @@ function categoryLabel(cat: string) {
   padding: 4px 8px;
   font-size: 12px;
   outline: none;
+}
+
+.gift-range {
+  width: 118px;
+  flex: 0 0 118px;
+  font-size: 12px;
+}
+
+.gift-refresh {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gift-refresh:hover:not(:disabled) {
+  border-color: rgba(255, 138, 61, 0.45);
+  color: var(--accent-2);
+}
+
+.gift-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.gift-selected .sel-diamond {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .gift-selected {
@@ -1074,7 +1533,8 @@ function categoryLabel(cat: string) {
 .gift-grid {
   max-height: 168px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  /* 原 108px × 1.5 ≈ 162px */
+  grid-template-columns: repeat(auto-fill, minmax(162px, 1fr));
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--line);
@@ -1116,12 +1576,25 @@ function categoryLabel(cat: string) {
   background: rgba(0, 0, 0, 0.2);
 }
 
+.gift-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
 .gift-name {
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+}
+
+.gift-diamond {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.2;
 }
 
 .params label {

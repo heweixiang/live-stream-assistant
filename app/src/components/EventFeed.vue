@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { giftFallbackIcon, resolveChatParts } from '../lib/douyinEmoji'
 import type { LiveEvent } from '../types'
 import FontGear from './FontGear.vue'
@@ -19,12 +19,19 @@ function onScroll() {
   stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
 }
 
-async function scrollToBottom() {
+async function scrollToBottom(force = false) {
   await nextTick()
   const el = listRef.value
-  if (!el || !stickBottom.value) return
+  if (!el) return
+  if (!force && !stickBottom.value) return
   el.scrollTop = el.scrollHeight
 }
+
+/** 切回监听页重建时强制滚底（数据仍在、组件已销毁重建） */
+onMounted(() => {
+  stickBottom.value = true
+  void scrollToBottom(true)
+})
 
 watch(
   () => props.events.length,

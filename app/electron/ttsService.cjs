@@ -1,6 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const { clonesDir: dataClonesDir } = require('./dataStore.cjs')
+const { ensureMeloTts } = require('./meloTtsProcess.cjs')
 
 function xmlEscape(s) {
   return String(s ?? '')
@@ -77,6 +78,7 @@ async function azureSpeak(opts) {
 
 /**
  * 内置 MeloTTS（本地 HTTP 服务，默认 127.0.0.1:8766）
+ * 连接前会自动尝试拉起服务
  * @param {{ text: string, rate?: number, meloUrl?: string }} opts
  */
 async function meloSpeak(opts) {
@@ -84,6 +86,15 @@ async function meloSpeak(opts) {
   if (!text) throw new Error('朗读文本为空')
   const base = String(opts.meloUrl || 'http://127.0.0.1:8766').replace(/\/$/, '')
   const speed = Math.min(2, Math.max(0.5, Number(opts.rate) || 1))
+
+  // 默认本机地址：自动启停；自定义地址则只请求
+  if (base.includes('127.0.0.1:8766') || base.includes('localhost:8766')) {
+    const boot = await ensureMeloTts({ waitReady: true })
+    if (!boot?.ok) {
+      throw new Error(boot?.error || '无法自动启动内置 MeloTTS')
+    }
+  }
+
   let res
   try {
     res = await fetch(`${base}/tts`, {
@@ -93,7 +104,7 @@ async function meloSpeak(opts) {
     })
   } catch (e) {
     throw new Error(
-      `无法连接内置 MeloTTS（${base}）。请先运行：npm run tts\n${e instanceof Error ? e.message : String(e)}`,
+      `无法连接内置 MeloTTS（${base}）。${e instanceof Error ? e.message : String(e)}`,
     )
   }
   const data = await res.json().catch(() => ({}))

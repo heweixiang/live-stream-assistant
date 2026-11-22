@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { giftFallbackIcon } from '../lib/douyinEmoji'
 import type { LiveEvent } from '../types'
 import FontGear from './FontGear.vue'
@@ -18,12 +18,20 @@ function iconOf(g: LiveEvent) {
   return g.gift_icon || giftFallbackIcon(g.gift_name)
 }
 
+async function scrollToBottom() {
+  await nextTick()
+  const el = listRef.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+onMounted(() => {
+  void scrollToBottom()
+})
+
 watch(
   () => props.gifts.length,
-  async () => {
-    await nextTick()
-    const el = listRef.value
-    if (el) el.scrollTop = el.scrollHeight
+  () => {
+    void scrollToBottom()
   },
 )
 </script>

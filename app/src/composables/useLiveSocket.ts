@@ -102,16 +102,6 @@ export function useLiveSocket(url = DEFAULT_URL) {
   let disposed = false
   let seq = 0
 
-  function resetSessionStats() {
-    chatTotal.value = 0
-    giftTotal.value = 0
-    enterTotal.value = 0
-    onlineCount.value = null
-    onlineText.value = ''
-    likeTotal.value = null
-    likeText.value = ''
-  }
-
   function asNum(v: unknown): number | null {
     if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
     if (typeof v === 'string' && v.trim()) {
@@ -264,7 +254,7 @@ export function useLiveSocket(url = DEFAULT_URL) {
     }
 
     ws.onerror = () => {
-      error.value = '本地服务未启动，请先运行：python core/server.py'
+      error.value = '本地核心服务未连接，正在重试…'
     }
 
     ws.onclose = () => {
@@ -289,6 +279,13 @@ export function useLiveSocket(url = DEFAULT_URL) {
     enterTotal.value = 0
   }
 
+  /** 从持久化恢复本场累计（不清事件列表） */
+  function restoreSessionTotals(s: { chatTotal?: number; giftTotal?: number; enterTotal?: number }) {
+    chatTotal.value = Math.max(0, Number(s.chatTotal) || 0)
+    giftTotal.value = Math.max(0, Number(s.giftTotal) || 0)
+    enterTotal.value = Math.max(0, Number(s.enterTotal) || 0)
+  }
+
   /** 连接某个平台的直播间 */
   function connectRoom(platform: PlatformId, roomId: string, cookie = '') {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -297,7 +294,7 @@ export function useLiveSocket(url = DEFAULT_URL) {
     }
     roomState.value = 'connecting'
     activePlatform.value = platform
-    resetSessionStats()
+    // 本场统计持久化，重连不清零（仅「清空列表」重置）
     ws.send(
       JSON.stringify({
         action: 'connect',
@@ -345,6 +342,7 @@ export function useLiveSocket(url = DEFAULT_URL) {
     likeTotal,
     likeText,
     clearEvents,
+    restoreSessionTotals,
     connectRoom,
     disconnectRoom,
   }

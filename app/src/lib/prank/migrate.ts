@@ -13,6 +13,14 @@ export function migrateRules(raw: unknown): PrankRule[] | null {
     return (raw as PrankRule[]).map((r) => ({
       ...r,
       enabled: r.enabled !== false,
+      effectTimesMode: r.effectTimesMode === 'bind' ? 'bind' : 'repeat',
+      trigger: {
+        ...r.trigger,
+        giftCountMode:
+          r.trigger?.giftCountMode === 'eq' || r.trigger?.giftCountMode === 'gte'
+            ? r.trigger.giftCountMode
+            : 'gte',
+      },
       actions: (r.actions || []).map((a) => ({
         ...a,
         enabled: a.enabled !== false,
@@ -39,6 +47,7 @@ export function migrateRules(raw: unknown): PrankRule[] | null {
       keywords: r.trigger?.keywords || [],
       minValue: r.trigger?.minValue ?? 1,
       giftCount: 1,
+      giftCountMode: 'gte',
       multiByGiftCount: false,
       multiIntervalSec: 1,
       userCooldownSec: 0,
@@ -56,6 +65,7 @@ export function migrateRules(raw: unknown): PrankRule[] | null {
       hotkey: '',
       trigger,
       effectMode: 'sequential' as const,
+      effectTimesMode: 'repeat' as const,
       actions: [act],
       cooldownSec: r.cooldownSec ?? 3,
     }

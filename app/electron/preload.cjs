@@ -26,6 +26,16 @@ contextBridge.exposeInMainWorld('liveAssistant', {
   openDataFolder: () => ipcRenderer.invoke('data:openFolder'),
   exportDataZip: () => ipcRenderer.invoke('data:exportZip'),
   importDataZip: () => ipcRenderer.invoke('data:importZip'),
+  /** 拉取抖音官方礼物列表（含抖钻），写入本机数据目录 */
+  fetchDouyinGifts: () => ipcRenderer.invoke('gifts:fetchOfficial'),
+  /** 读取本机缓存的官价目录 */
+  loadCachedDouyinGifts: () => ipcRenderer.invoke('gifts:loadCachedOfficial'),
+  /** 复盘：保存/列表/读取/删除 */
+  saveReplaySession: (session, maxSessions) =>
+    ipcRenderer.invoke('replay:save', session, maxSessions),
+  listReplaySessions: () => ipcRenderer.invoke('replay:list'),
+  loadReplaySession: (id) => ipcRenderer.invoke('replay:load', id),
+  deleteReplaySession: (id) => ipcRenderer.invoke('replay:delete', id),
   /** 打开抖音登录窗（扫码/手机号），成功返回 Cookie */
   douyinLogin: (opts) => ipcRenderer.invoke('auth:douyinLogin', opts || {}),
   /** 清除本机抖音登录会话 */
@@ -36,5 +46,10 @@ contextBridge.exposeInMainWorld('liveAssistant', {
   isAdmin: () => ipcRenderer.invoke('app:isAdmin'),
   /** 以管理员重新启动（会弹 UAC） */
   relaunchAsAdmin: () => ipcRenderer.invoke('app:relaunchAsAdmin'),
+  /** OBS 整蛊叠层服务 */
+  overlayStart: (port) => ipcRenderer.invoke('overlay:start', port),
+  overlayStop: () => ipcRenderer.invoke('overlay:stop'),
+  overlayStatus: () => ipcRenderer.invoke('overlay:status'),
+  overlaySetState: (state) => ipcRenderer.invoke('overlay:setState', state),
   platform: process.platform,
 })

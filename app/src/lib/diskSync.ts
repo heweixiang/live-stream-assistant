@@ -7,7 +7,14 @@
  */
 import { DEFAULT_TTS_SETTINGS, type TtsSettings } from './tts/settings'
 import { DEFAULT_ANNOUNCE_SETTINGS, type AnnounceSettings } from './tts/announce'
+import {
+  DEFAULT_OVERLAY_SETTINGS,
+  type OverlaySettings,
+} from './prank/overlaySettings'
+import { EMPTY_SESSION_STATS, type SessionStats } from './sessionStats'
+import { DEFAULT_REPLAY_CONFIG, type ReplayConfig } from './replay/types'
 import type { GiftCatalogItem, LiveLayout, PanelFonts } from './storage'
+import type { GiftDiamondOverrides } from './giftDiamondOverrides'
 import type { PrankRule } from '../types'
 
 const KEYS = {
@@ -18,9 +25,13 @@ const KEYS = {
   prankMaster: 'live-assistant.prankMasterEnabled',
   layout: 'live-assistant.layout',
   giftCatalog: 'live-assistant.giftCatalog',
+  giftDiamondOverrides: 'live-assistant.giftDiamondOverrides',
   panelFonts: 'live-assistant.panelFonts',
   tts: 'live-assistant.ttsSettings',
   announce: 'live-assistant.announceSettings',
+  overlay: 'live-assistant.overlaySettings',
+  session: 'live-assistant.sessionStats',
+  replayConfig: 'live-assistant.replayConfig',
 } as const
 
 const FALLBACK_LAYOUT: LiveLayout = {
@@ -48,9 +59,14 @@ export type DiskSettings = {
   prankMasterEnabled?: boolean
   layout?: LiveLayout
   giftCatalog?: GiftCatalogItem[]
+  /** 用户自定义礼物抖钻覆盖 */
+  giftDiamondOverrides?: GiftDiamondOverrides
   panelFonts?: PanelFonts
   ttsSettings?: TtsSettings
   announceSettings?: AnnounceSettings
+  overlaySettings?: OverlaySettings
+  sessionStats?: SessionStats
+  replayConfig?: ReplayConfig
   updatedAt?: string
 }
 
@@ -99,9 +115,15 @@ export async function bootstrapFromDisk(): Promise<{ ok: boolean; root?: string 
       }
       if (disk.layout) setRaw(KEYS.layout, JSON.stringify(disk.layout))
       if (disk.giftCatalog) setRaw(KEYS.giftCatalog, JSON.stringify(disk.giftCatalog))
+      if (disk.giftDiamondOverrides) {
+        setRaw(KEYS.giftDiamondOverrides, JSON.stringify(disk.giftDiamondOverrides))
+      }
       if (disk.panelFonts) setRaw(KEYS.panelFonts, JSON.stringify(disk.panelFonts))
       if (disk.ttsSettings) setRaw(KEYS.tts, JSON.stringify(disk.ttsSettings))
       if (disk.announceSettings) setRaw(KEYS.announce, JSON.stringify(disk.announceSettings))
+      if (disk.overlaySettings) setRaw(KEYS.overlay, JSON.stringify(disk.overlaySettings))
+      if (disk.sessionStats) setRaw(KEYS.session, JSON.stringify(disk.sessionStats))
+      if (disk.replayConfig) setRaw(KEYS.replayConfig, JSON.stringify(disk.replayConfig))
       diskHydrated = true
     } else {
       // 首次：把现有 localStorage（含默认玩法）灌进磁盘
@@ -134,9 +156,13 @@ export async function flushAllToDisk(): Promise<void> {
         : localStorage.getItem(KEYS.prankMaster) === '1',
     layout: readJson(KEYS.layout, FALLBACK_LAYOUT),
     giftCatalog: readJson(KEYS.giftCatalog, []),
+    giftDiamondOverrides: readJson(KEYS.giftDiamondOverrides, {}),
     panelFonts: readJson(KEYS.panelFonts, FALLBACK_FONTS),
     ttsSettings: readJson(KEYS.tts, DEFAULT_TTS_SETTINGS),
     announceSettings: readJson(KEYS.announce, DEFAULT_ANNOUNCE_SETTINGS),
+    overlaySettings: readJson(KEYS.overlay, DEFAULT_OVERLAY_SETTINGS),
+    sessionStats: readJson(KEYS.session, EMPTY_SESSION_STATS),
+    replayConfig: readJson(KEYS.replayConfig, DEFAULT_REPLAY_CONFIG),
   }
   await api.saveDiskSettings(patch)
 }

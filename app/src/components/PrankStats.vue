@@ -7,38 +7,64 @@ import { usePanelFonts } from '../composables/usePanelFonts'
 const props = defineProps<{
   actions: FiredAction[]
   rules: PrankRule[]
+  /** 持久化累计次数（优先） */
+  counts?: Record<string, number>
 }>()
 
 const { fonts } = usePanelFonts()
 
-/** 按规则汇总本场触发次数 */
+/** 按规则汇总本场触发次数；顺序与玩法列表一致 */
 const rows = computed(() => {
+  const fromCounts = props.counts && Object.keys(props.counts).length > 0
   const map = new Map<string, { ruleId: string; name: string; count: number; lastAt: number }>()
-  for (const a of props.actions) {
-    const key = a.ruleId || a.ruleName
-    const prev = map.get(key)
-    if (prev) {
-      prev.count += 1
-      if (a.at > prev.lastAt) prev.lastAt = a.at
-    } else {
-      map.set(key, {
-        ruleId: a.ruleId,
-        name: a.ruleName || '未命名',
-        count: 1,
-        lastAt: a.at || 0,
-      })
+  if (!fromCounts) {
+    for (const a of props.actions) {
+      const key = a.ruleId || a.ruleName
+      const prev = map.get(key)
+      if (prev) {
+        prev.count += 1
+        if (a.at > prev.lastAt) prev.lastAt = a.at
+      } else {
+        map.set(key, {
+          ruleId: a.ruleId,
+          name: a.ruleName || '未命名',
+          count: 1,
+          lastAt: a.at || 0,
+        })
+      }
     }
   }
+  const out: { ruleId: string; name: string; count: number; lastAt: number }[] = []
   for (const r of props.rules) {
     if (!r.enabled) continue
-    if (!map.has(r.id)) {
-      map.set(r.id, { ruleId: r.id, name: r.name, count: 0, lastAt: 0 })
+    if (fromCounts) {
+      out.push({
+        ruleId: r.id,
+        name: r.name,
+        count: Math.max(0, Number(props.counts?.[r.id]) || 0),
+        lastAt: 0,
+      })
+      continue
     }
+    const hit = map.get(r.id)
+    out.push(
+      hit || {
+        ruleId: r.id,
+        name: r.name,
+        count: 0,
+        lastAt: 0,
+      },
+    )
   }
-  return [...map.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh'))
+  return out
 })
 
-const total = computed(() => props.actions.length)
+const total = computed(() => {
+  if (props.counts && Object.keys(props.counts).length) {
+    return Object.values(props.counts).reduce((s, n) => s + Math.max(0, Number(n) || 0), 0)
+  }
+  return props.actions.length
+})
 const hitRules = computed(() => rows.value.filter((r) => r.count > 0).length)
 </script>
 

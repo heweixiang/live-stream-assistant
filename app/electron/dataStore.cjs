@@ -12,11 +12,14 @@ const { app, dialog, shell } = require('electron')
 
 const execFileAsync = promisify(execFile)
 
-/** 配置类相对路径（导入覆盖） */
+/** 配置类相对路径（导入覆盖）；其余媒体已存在则跳过 */
 const CONFIG_FILES = new Set([
   'settings.json',
   'voice-clones/samples.json',
+  'douyin-gifts.json',
+  'meloWorkspace.json',
   'README.txt',
+  'replays/index.json',
 ])
 
 function getDataRoot() {
@@ -28,23 +31,26 @@ function ensureDataRoot() {
   const root = getDataRoot()
   fs.mkdirSync(path.join(root, 'voice-clones'), { recursive: true })
   fs.mkdirSync(path.join(root, 'sounds'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'replays'), { recursive: true })
   const readme = path.join(root, 'README.txt')
-  if (!fs.existsSync(readme)) {
-    fs.writeFileSync(
-      readme,
-      [
-        '直播助手 本地数据目录',
-        '',
-        'settings.json     —— 规则 / TTS / 播报 / 布局等配置（导入时覆盖）',
-        'voice-clones/     —— 语音克隆录音样本（导入时已有文件则跳过）',
-        'sounds/          —— 自定义音效（导入时已有文件则跳过）',
-        '',
-        '可用应用内「导出数据包」打成 zip，或「导入数据包」合并回来。',
-        '',
-      ].join('\n'),
-      'utf8',
-    )
-  }
+  // 每次确保说明与目录结构同步（短文本，可覆盖）
+  fs.writeFileSync(
+    readme,
+    [
+      '直播助手 本地数据目录',
+      '',
+      'settings.json       —— 规则 / TTS / 播报 / 布局 / 礼物改价 / 复盘配置等（导入覆盖）',
+      'replays/            —— 直播复盘场次 JSON + index.json（导入覆盖）',
+      'douyin-gifts.json   —— 官方礼物目录缓存（导入覆盖）',
+      'voice-clones/       —— 语音克隆录音样本（导入时已有文件则跳过）',
+      'sounds/             —— 自定义音效（导入时已有文件则跳过）',
+      'meloWorkspace.json  —— MeloTTS 工作区标记',
+      '',
+      '「导出数据包」会打包本目录全部内容；导入时配置/复盘覆盖，媒体跳过已有。',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
   return root
 }
 
@@ -100,8 +106,11 @@ function walkFiles(dir, base = dir, out = []) {
 function isConfigRel(rel) {
   const n = rel.replace(/\\/g, '/')
   if (CONFIG_FILES.has(n)) return true
+  // 根目录 json（settings / douyin-gifts 等）
   if (n.endsWith('.json') && !n.includes('/')) return true
   if (n.startsWith('config/') && n.endsWith('.json')) return true
+  // 复盘场次：整包恢复时应覆盖
+  if (n.startsWith('replays/') && n.endsWith('.json')) return true
   return false
 }
 
@@ -179,7 +188,8 @@ async function importDataZip(win) {
       if (fs.statSync(only).isDirectory()) {
         const hasSettings =
           fs.existsSync(path.join(only, 'settings.json')) ||
-          fs.existsSync(path.join(only, 'voice-clones'))
+          fs.existsSync(path.join(only, 'voice-clones')) ||
+          fs.existsSync(path.join(only, 'replays'))
         if (hasSettings) src = only
       }
     }

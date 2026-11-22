@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import AnnounceSettingsPanel from './AnnounceSettingsPanel.vue'
+import GiftManagePanel from './GiftManagePanel.vue'
+import ReplaySettingsPanel from './ReplaySettingsPanel.vue'
 import {
   loadTtsSettings,
   saveTtsSettings,
@@ -9,15 +11,22 @@ import {
 } from '../lib/tts/settings'
 import { speakText } from '../lib/tts/speak'
 
-type SettingsMenuId = 'tts' | 'voice-clone' | 'announce' | 'general' | 'about'
+type SettingsMenuId = 'tts' | 'voice-clone' | 'announce' | 'gifts' | 'replay' | 'general' | 'about'
 
 const MENUS: { id: SettingsMenuId; label: string; desc: string; ready: boolean }[] = [
   { id: 'tts', label: 'TTS 语音', desc: 'MeloTTS / 本机', ready: true },
   { id: 'voice-clone', label: '语音克隆', desc: '录音样本管理', ready: true },
   { id: 'announce', label: '语音播报', desc: '点赞聚合 / 模板', ready: true },
+  { id: 'gifts', label: '礼物管理', desc: '', ready: true },
+  { id: 'replay', label: '复盘配置', desc: '录制开关 / 内容', ready: true },
   { id: 'general', label: '通用', desc: '权限 / 数据目录', ready: true },
   { id: 'about', label: '关于', desc: '版本与说明', ready: true },
 ]
+
+const emit = defineEmits<{
+  replayConfigChanged: [import('../lib/replay/types').ReplayConfig]
+}>()
+
 
 const menu = ref<SettingsMenuId>('tts')
 const form = reactive<TtsSettings>(loadTtsSettings())
@@ -256,8 +265,8 @@ async function exportZip() {
     hint.value = '请使用桌面客户端导出 zip'
     return
   }
-  const { flushAllToDisk } = await import('../lib/diskSync')
-  await flushAllToDisk()
+  const { prepareDataPackageExport } = await import('../lib/dataPackage')
+  await prepareDataPackageExport()
   const res = await api.exportDataZip()
   if (res.canceled) return
   if (!res.ok) {
@@ -303,16 +312,18 @@ async function importZip() {
         @click="menu = m.id"
       >
         <strong>{{ m.label }}</strong>
-        <span>{{ m.desc }}{{ m.ready ? '' : ' · 待扩展' }}</span>
+        <span v-if="m.desc">{{ m.desc }}{{ m.ready ? '' : ' · 待扩展' }}</span>
+        <span v-else-if="!m.ready">待扩展</span>
       </button>
     </aside>
 
     <div class="main">
-      <header class="head">
-        <div>
+      <header class="head" :class="{ 'head-gifts': menu === 'gifts' }">
+        <div class="head-title">
           <h1>{{ currentMenu.label }}</h1>
-          <p>{{ currentMenu.desc }}</p>
+          <p v-if="currentMenu.desc">{{ currentMenu.desc }}</p>
         </div>
+        <div v-if="menu === 'gifts'" id="gift-manage-head" class="head-gifts-slot" />
         <div v-if="menu === 'tts' || menu === 'voice-clone'" class="head-acts">
           <button type="button" class="ghost" @click="persist">保存</button>
           <button
@@ -353,7 +364,7 @@ async function importZip() {
               />
             </label>
             <p class="tip">
-              先另开终端运行 <code>npm run tts</code> 启动本地语音服务（首次加载模型约十几秒）。中文音色，免密钥。
+              应用启动时会自动拉起本地 MeloTTS（首次加载模型约十几秒）。也可手动运行 <code>npm run tts</code>。中文音色，免密钥。
             </p>
           </template>
           <p v-else class="tip">使用 Windows / 浏览器内置语音，无需密钥。</p>
@@ -438,6 +449,17 @@ async function importZip() {
         <AnnounceSettingsPanel @hint="(m) => (hint = m)" />
       </div>
 
+      <div v-else-if="menu === 'gifts'" class="panel wide gift-panel">
+        <GiftManagePanel @hint="(m) => (hint = m)" />
+      </div>
+
+      <div v-else-if="menu === 'replay'" class="panel">
+        <ReplaySettingsPanel
+          @hint="(m) => (hint = m)"
+          @changed="(c) => emit('replayConfigChanged', c)"
+        />
+      </div>
+
       <div v-else-if="menu === 'general'" class="panel">
         <fieldset class="box">
           <legend>运行权限</legend>
@@ -465,8 +487,8 @@ async function importZip() {
         <fieldset class="box">
           <legend>数据目录</legend>
           <p class="tip">
-            配置、录音样本统一放在本机文件夹（默认：文档\直播助手）。导出即打成 zip；导入时
-            <strong>配置文件覆盖</strong>，录音等媒体<strong>已存在则跳过</strong>。
+            配置、复盘场次、礼物目录/改价、录音样本统一在本机文件夹（默认：文档\直播助手）。导出即整夹
+            zip；导入时<strong>配置与复盘覆盖</strong>，录音等媒体<strong>已存在则跳过</strong>。
           </p>
           <label>
             <span>当前路径</span>
@@ -490,7 +512,7 @@ async function importZip() {
         <div class="placeholder">
           <h2>直播助手</h2>
           <p>桌面端整蛊 / 监听工具。设置项会陆续往左侧菜单扩展。</p>
-          <p class="muted">版本 0.1.0-beta.3</p>
+          <p class="muted">版本 0.1.0-beta.7</p>
         </div>
       </div>
     </div>
@@ -568,10 +590,14 @@ async function importZip() {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 16px 18px 28px;
+  padding: 16px 18px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.settings:has(.gift-panel) .main {
+  overflow: hidden;
 }
 
 .head {
@@ -579,6 +605,24 @@ async function importZip() {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+}
+
+.head-gifts {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 20px;
+  max-width: 920px;
+}
+
+.head-title {
+  flex: 0 0 auto;
+}
+
+.head-gifts-slot {
+  flex: 0 1 auto;
+  display: flex;
+  justify-content: flex-start;
+  min-width: 0;
 }
 
 .head h1 {
@@ -617,7 +661,18 @@ async function importZip() {
 }
 
 .panel.wide {
-  max-width: 780px;
+  max-width: 960px;
+}
+
+.panel.wide.gift-panel {
+  max-width: 920px;
+  width: 100%;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .panel.stack {

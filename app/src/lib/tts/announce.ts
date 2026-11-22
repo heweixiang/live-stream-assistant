@@ -185,7 +185,9 @@ export function varsFromLiveEvent(event: LiveEvent): { kind: AnnounceKind; vars:
         vars: {
           UserName: user,
           礼物: (event.gift_name || '礼物').trim() || '礼物',
-          数量: String(event.gift_count || 1),
+          数量: String(
+            event.extra?.combo_total ?? event.extra?.gift_delta ?? event.gift_count ?? 1,
+          ),
           价值: String(event.gift_value ?? ''),
         },
       }

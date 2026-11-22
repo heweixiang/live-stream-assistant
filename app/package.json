@@ -1,7 +1,7 @@
 {
   "name": "live-assistant",
   "private": true,
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.14",
   "description": "抖音直播助手桌面端",
   "author": "直播助手",
   "main": "electron/main.cjs",

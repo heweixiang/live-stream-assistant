@@ -25,7 +25,25 @@ const {
   openDataFolder,
   migrateLegacyClones,
 } = require('./dataStore.cjs')
+const {
+  fetchAndSaveOfficialGifts,
+  loadCachedOfficialGifts,
+} = require('./douyinGiftsFetch.cjs')
+const {
+  saveReplaySession,
+  listReplaySessions,
+  loadReplaySession,
+  deleteReplaySession,
+} = require('./replayStore.cjs')
 const { isRunningAsAdmin, relaunchAsAdmin } = require('./admin.cjs')
+const {
+  startOverlayServer,
+  stopOverlayServer,
+  setOverlayState,
+  getOverlayStatus,
+} = require('./overlayServer.cjs')
+const { ensureMeloTts, stopMeloTts } = require('./meloTtsProcess.cjs')
+const { ensureLiveCore, stopLiveCore } = require('./coreProcess.cjs')
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null
@@ -77,12 +95,33 @@ app.whenReady().then(async () => {
   migrateLegacyClones()
   createWindow()
 
+  // 后台自动拉起弹幕核心（8765），桌面端无需再手动 python core/server.py
+  void ensureLiveCore({ waitReady: true }).then((r) => {
+    if (!r?.ok) console.warn('[live-core] auto-start failed:', r?.error || r)
+    else console.log('[live-core] ready', r.url || '', r.root || '', r.reused ? '(reused)' : '')
+  })
+
+  // 后台自动拉起 MeloTTS（不阻塞窗口；首次加载模型可能十几秒）
+  void ensureMeloTts({ waitReady: true }).then((r) => {
+    if (!r?.ok) console.warn('[melo-tts] auto-start failed:', r?.error || r)
+    else console.log('[melo-tts] ready', r.url || '', r.root || '')
+  })
+
   ipcMain.handle('app:isAdmin', async () => isRunningAsAdmin())
   ipcMain.handle('app:relaunchAsAdmin', async () => {
     const ok = await isRunningAsAdmin()
     if (ok) return { ok: true, already: true }
     relaunchAsAdmin()
     return { ok: true, already: false }
+  })
+
+  // OBS 整蛊叠层（Browser Source）
+  ipcMain.handle('overlay:start', async (_e, port) => startOverlayServer(port))
+  ipcMain.handle('overlay:stop', async () => stopOverlayServer())
+  ipcMain.handle('overlay:status', async () => getOverlayStatus())
+  ipcMain.handle('overlay:setState', async (_e, state) => {
+    setOverlayState(state || {})
+    return { ok: true }
   })
 
   // 先出窗口再提示提权，避免开发态「秒退看不见界面」
@@ -121,13 +160,7 @@ app.whenReady().then(async () => {
     try {
       const result = await executeAction(action)
       if (result?.kind === 'notify' || result?.kind === 'toast') {
-        if (result.kind === 'notify' && Notification.isSupported()) {
-          new Notification({
-            title: '整蛊触发',
-            body: result.message || '',
-            icon: iconPath,
-          }).show()
-        }
+        // toast/notify 由渲染进程自行展示；正式触发不再弹系统通知
         return { ok: true, ...result }
       }
       return { ok: true, ...result }
@@ -242,6 +275,52 @@ app.whenReady().then(async () => {
     }
   })
 
+  // 礼物官价：官方 webcast/gift/list 接口
+  ipcMain.handle('gifts:fetchOfficial', async () => {
+    try {
+      return await fetchAndSaveOfficialGifts()
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle('gifts:loadCachedOfficial', async () => {
+    try {
+      return loadCachedOfficialGifts()
+    } catch {
+      return null
+    }
+  })
+
+  // 复盘会话
+  ipcMain.handle('replay:save', async (_e, session, maxSessions) => {
+    try {
+      return saveReplaySession(session, maxSessions)
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle('replay:list', async () => {
+    try {
+      return listReplaySessions()
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle('replay:load', async (_e, id) => {
+    try {
+      return loadReplaySession(id)
+    } catch {
+      return null
+    }
+  })
+  ipcMain.handle('replay:delete', async (_e, id) => {
+    try {
+      return deleteReplaySession(id)
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
   // 麦克风权限（录音克隆）
   const { session } = require('electron')
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
@@ -258,5 +337,14 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  void stopOverlayServer()
+  stopLiveCore()
+  stopMeloTts()
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  void stopOverlayServer()
+  stopLiveCore()
+  stopMeloTts()
 })

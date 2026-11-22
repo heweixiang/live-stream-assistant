@@ -210,11 +210,83 @@ export function savePrankMasterEnabled(on: boolean) {
 
 const GIFT_CATALOG_KEY = 'live-assistant.giftCatalog'
 
+/** 本地日历日 YYYY-MM-DD，用于「今日收到」 */
+export function giftCountDayKey(ts = Date.now()): string {
+  const d = new Date(ts)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export type GiftCatalogItem = {
   name: string
   icon?: string
+  /** 所有天累计收到次数（= sum(daily)） */
   count: number
+  /** 今日收到次数 */
+  todayCount?: number
+  /** todayCount 所属日期 */
+  countDay?: string
+  /** 按日明细 YYYY-MM-DD → 次数 */
+  daily?: Record<string, number>
   lastAt: number
+}
+
+function sumDaily(daily: Record<string, number>): number {
+  let s = 0
+  for (const v of Object.values(daily)) s += Math.max(0, Number(v) || 0)
+  return s
+}
+
+function normalizeGiftCatalogItem(
+  g: Partial<GiftCatalogItem> & { name?: string; totalCount?: number },
+): GiftCatalogItem | null {
+  const name = String(g?.name || '').trim()
+  if (!name) return null
+  const today = giftCountDayKey()
+  const countDay = String(g.countDay || '').trim()
+  const daily: Record<string, number> = {}
+
+  if (g.daily && typeof g.daily === 'object') {
+    for (const [k, v] of Object.entries(g.daily)) {
+      const day = String(k || '').trim()
+      const n = Math.max(0, Number(v) || 0)
+      if (day && n > 0) daily[day] = n
+    }
+  }
+
+  if (!Object.keys(daily).length) {
+    // 从旧字段迁入按日明细
+    if (g.totalCount != null || g.todayCount != null) {
+      const total = Math.max(0, Number(g.totalCount ?? g.count) || 0)
+      const todayN = countDay === today ? Math.max(0, Number(g.todayCount) || 0) : 0
+      if (todayN > 0) daily[today] = todayN
+      const rest = Math.max(0, total - todayN)
+      if (rest > 0) daily['1970-01-01'] = rest // 无法还原日期的历史累计
+    } else if (countDay === today) {
+      const c = Math.max(0, Number(g.count) || 0)
+      if (c > 0) daily[today] = c
+    } else if (countDay) {
+      const c = Math.max(0, Number(g.count) || 0)
+      if (c > 0) daily[countDay] = c
+    } else {
+      const c = Math.max(0, Number(g.count) || 0)
+      if (c > 0) daily['1970-01-01'] = c
+    }
+  }
+
+  const todayCount = daily[today] || 0
+  const totalCount = sumDaily(daily)
+  return {
+    name,
+    icon: g.icon || '',
+    count: totalCount,
+    todayCount,
+    countDay: today,
+    daily,
+    lastAt: Number(g.lastAt) || 0,
+  }
 }
 
 export function loadGiftCatalog(): GiftCatalogItem[] {
@@ -224,13 +296,8 @@ export function loadGiftCatalog(): GiftCatalogItem[] {
     const parsed = JSON.parse(raw) as GiftCatalogItem[]
     if (!Array.isArray(parsed)) return []
     return parsed
-      .filter((g) => g && typeof g.name === 'string' && g.name.trim())
-      .map((g) => ({
-        name: g.name.trim(),
-        icon: g.icon || '',
-        count: Number(g.count) || 0,
-        lastAt: Number(g.lastAt) || 0,
-      }))
+      .map((g) => normalizeGiftCatalogItem(g))
+      .filter((g): g is GiftCatalogItem => !!g)
   } catch {
     return []
   }
@@ -238,7 +305,20 @@ export function loadGiftCatalog(): GiftCatalogItem[] {
 
 export function saveGiftCatalog(list: GiftCatalogItem[]) {
   try {
-    localStorage.setItem(GIFT_CATALOG_KEY, JSON.stringify(list.slice(0, 200)))
+    const normalized = list
+      .map((g) => normalizeGiftCatalogItem(g))
+      .filter((g): g is GiftCatalogItem => !!g)
+      .map((g) => ({
+        name: g.name,
+        icon: g.icon || '',
+        count: g.count,
+        todayCount: g.todayCount || 0,
+        countDay: giftCountDayKey(),
+        daily: g.daily || {},
+        lastAt: g.lastAt || 0,
+        totalCount: g.count,
+      }))
+    localStorage.setItem(GIFT_CATALOG_KEY, JSON.stringify(normalized.slice(0, 2000)))
     void import('./diskSync').then((m) => m.scheduleFlushToDisk())
   } catch {
     // ignore
@@ -254,22 +334,88 @@ export function upsertGiftCatalog(
   if (!name) return list
   const add = Math.max(0, Number(gift.count) || 0)
   const ts = gift.ts || Date.now()
+  const day = giftCountDayKey(ts)
   const icon = (gift.icon || '').trim()
-  const next = [...list]
+  const next = list
+    .map((g) => normalizeGiftCatalogItem(g))
+    .filter((g): g is GiftCatalogItem => !!g)
   const i = next.findIndex((g) => g.name === name)
   if (i >= 0) {
+    const daily = { ...(next[i].daily || {}) }
+    if (add > 0) daily[day] = (daily[day] || 0) + add
+    const todayCount = daily[giftCountDayKey()] || 0
     next[i] = {
       ...next[i],
-      count: next[i].count + add,
+      daily,
+      count: sumDaily(daily),
+      todayCount,
+      countDay: giftCountDayKey(),
       lastAt: Math.max(next[i].lastAt, ts),
-      // 已有真实图不丢；新来的 http 图可覆盖本地兜底
       icon: icon.startsWith('http') ? icon : next[i].icon || icon,
     }
   } else {
-    next.unshift({ name, icon, count: add, lastAt: ts })
+    const daily: Record<string, number> = add > 0 ? { [day]: add } : {}
+    next.unshift({
+      name,
+      icon,
+      count: add,
+      todayCount: day === giftCountDayKey() ? add : 0,
+      countDay: giftCountDayKey(),
+      daily,
+      lastAt: ts,
+    })
   }
   next.sort((a, b) => b.lastAt - a.lastAt || b.count - a.count)
-  return next.slice(0, 200)
+  return next.slice(0, 2000)
+}
+
+export type GiftClearRangeMode = 'today' | '7d' | '30d' | 'all' | 'custom'
+
+/** 按日期范围清零收到次数 */
+export function clearGiftCountsByRange(
+  list: GiftCatalogItem[],
+  opts: { mode: GiftClearRangeMode; from?: string; to?: string },
+): GiftCatalogItem[] {
+  const today = giftCountDayKey()
+  let from = ''
+  let to = ''
+  if (opts.mode === 'today') {
+    from = to = today
+  } else if (opts.mode === '7d' || opts.mode === '30d') {
+    const days = opts.mode === '7d' ? 6 : 29
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() - days)
+    from = giftCountDayKey(d.getTime())
+    to = today
+  } else if (opts.mode === 'custom') {
+    from = String(opts.from || '').trim()
+    to = String(opts.to || '').trim() || from
+    if (!from) return list.map((g) => normalizeGiftCatalogItem(g)!).filter(Boolean)
+  } else {
+    // all
+    return list.map((g) => {
+      const n = normalizeGiftCatalogItem(g)!
+      return { ...n, count: 0, todayCount: 0, daily: {}, countDay: today }
+    })
+  }
+
+  return list
+    .map((g) => normalizeGiftCatalogItem(g))
+    .filter((g): g is GiftCatalogItem => !!g)
+    .map((g) => {
+      const daily = { ...(g.daily || {}) }
+      for (const day of Object.keys(daily)) {
+        if (day >= from && day <= to) delete daily[day]
+      }
+      return {
+        ...g,
+        daily,
+        count: sumDaily(daily),
+        todayCount: daily[today] || 0,
+        countDay: today,
+      }
+    })
 }
 
 const PANEL_FONTS_KEY = 'live-assistant.panelFonts'

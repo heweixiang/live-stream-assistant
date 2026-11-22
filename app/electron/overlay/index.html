@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>整蛊叠层</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent !important;
+        overflow: hidden;
+        font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+        color: #fff;
+      }
+      #app {
+        box-sizing: border-box;
+        padding: 12px;
+        width: var(--panel-w, 360px);
+        max-width: 100%;
+      }
+      .panel {
+        background: rgba(12, 14, 20, var(--bg-a, 0.45));
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 14px;
+        padding: 12px 14px 14px;
+        backdrop-filter: blur(6px);
+      }
+      .title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      .title h1 {
+        margin: 0;
+        font-size: calc(var(--font, 16px) + 2px);
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .title .total {
+        font-size: var(--font, 16px);
+        color: var(--accent, #ff8a3d);
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap, 10px);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+      .ico {
+        width: var(--ico, 28px);
+        height: var(--ico, 28px);
+        border-radius: 8px;
+        flex-shrink: 0;
+        background: rgba(255, 138, 61, 0.15);
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        font-size: calc(var(--ico, 28px) * 0.55);
+      }
+      .ico img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .name {
+        flex: 1;
+        min-width: 0;
+        font-size: var(--font, 16px);
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+      }
+      .count {
+        flex-shrink: 0;
+        font-size: var(--count, 20px);
+        font-weight: 800;
+        color: var(--accent, #ff8a3d);
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+      }
+      .empty {
+        margin: 4px 0 0;
+        font-size: var(--font, 16px);
+        color: rgba(255, 255, 255, 0.55);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="panel">
+        <div class="title" id="titleBar" style="display: none">
+          <h1 id="titleText">整蛊统计</h1>
+          <span class="total" id="totalText"></span>
+        </div>
+        <div class="list" id="list"></div>
+        <p class="empty" id="empty">等待数据…</p>
+      </div>
+    </div>
+    <script>
+      const listEl = document.getElementById('list')
+      const emptyEl = document.getElementById('empty')
+      const titleBar = document.getElementById('titleBar')
+      const titleText = document.getElementById('titleText')
+      const totalText = document.getElementById('totalText')
+      const root = document.getElementById('app')
+
+      function esc(s) {
+        return String(s ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+      }
+
+      function apply(state) {
+        if (!state || typeof state !== 'object') return
+        const iconSize = Number(state.iconSize) || 28
+        const fontSize = Number(state.fontSize) || 16
+        const countFont = Number(state.countFontSize) || 20
+        const gap = Number(state.gap) || 10
+        const panelW = Number(state.panelWidth) || 360
+        const bg = Math.min(1, Math.max(0, Number(state.bgOpacity)))
+        const accent = state.accentColor || '#ff8a3d'
+        root.style.setProperty('--panel-w', panelW + 'px')
+        root.style.setProperty('--ico', iconSize + 'px')
+        root.style.setProperty('--font', fontSize + 'px')
+        root.style.setProperty('--count', countFont + 'px')
+        root.style.setProperty('--gap', gap + 'px')
+        root.style.setProperty('--bg-a', String(Number.isFinite(bg) ? bg : 0.45))
+        root.style.setProperty('--accent', accent)
+
+        const showTitle = state.showTitle !== false
+        const showTotal = state.showTotal !== false
+        titleBar.style.display = showTitle || showTotal ? 'flex' : 'none'
+        titleText.style.display = showTitle ? '' : 'none'
+        titleText.textContent = state.title || '整蛊统计'
+        totalText.style.display = showTotal ? '' : 'none'
+        totalText.textContent = showTotal ? '共 ' + (Number(state.total) || 0) + ' 次' : ''
+
+        const rows = Array.isArray(state.rows) ? state.rows : []
+        listEl.innerHTML = rows
+          .map(function (r) {
+            const icon = (r.icon || '').trim()
+            const ico = icon
+              ? '<img src="' + esc(icon) + '" alt="" />'
+              : '<span>🎯</span>'
+            return (
+              '<div class="row">' +
+              '<div class="ico">' +
+              ico +
+              '</div>' +
+              '<div class="name">' +
+              esc(r.name || '未命名') +
+              '</div>' +
+              '<div class="count">' +
+              esc(String(Number(r.count) || 0)) +
+              '</div>' +
+              '</div>'
+            )
+          })
+          .join('')
+        emptyEl.style.display = rows.length ? 'none' : ''
+        emptyEl.textContent = rows.length ? '' : '暂无整蛊数据'
+      }
+
+      function connect() {
+        fetch('/api/state')
+          .then(function (r) {
+            return r.json()
+          })
+          .then(apply)
+          .catch(function () {})
+
+        const es = new EventSource('/api/events')
+        es.onmessage = function (ev) {
+          try {
+            apply(JSON.parse(ev.data))
+          } catch (e) {}
+        }
+        es.onerror = function () {
+          // 浏览器源会自动重连
+        }
+      }
+
+      connect()
+    </script>
+  </body>
+</html>

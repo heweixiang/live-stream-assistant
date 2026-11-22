@@ -68,6 +68,52 @@ declare global {
       isAdmin: () => Promise<boolean>
       /** 以管理员重新启动 */
       relaunchAsAdmin: () => Promise<{ ok: boolean; already?: boolean }>
+      overlayStart: (
+        port?: number,
+      ) => Promise<{ ok: boolean; url?: string; port?: number; error?: string }>
+      overlayStop: () => Promise<{ ok: boolean }>
+      overlayStatus: () => Promise<{
+        running: boolean
+        url: string
+        port: number
+        clients: number
+      }>
+      overlaySetState: (state: Record<string, unknown>) => Promise<{ ok: boolean }>
+      /** 官方礼物列表（现场拉取并缓存到文档目录） */
+      fetchDouyinGifts: () => Promise<{
+        ok: boolean
+        source?: string
+        updatedAt?: string
+        count?: number
+        gifts?: {
+          id: number
+          name: string
+          diamond: number
+          icon: string
+          panel: boolean
+        }[]
+        error?: string
+      }>
+      loadCachedDouyinGifts: () => Promise<{
+        ok: boolean
+        source?: string
+        updatedAt?: string
+        count?: number
+        gifts?: {
+          id: number
+          name: string
+          diamond: number
+          icon: string
+          panel: boolean
+        }[]
+      } | null>
+      saveReplaySession: (
+        session: unknown,
+        maxSessions?: number,
+      ) => Promise<{ ok: boolean; id?: string; path?: string; error?: string }>
+      listReplaySessions: () => Promise<unknown[]>
+      loadReplaySession: (id: string) => Promise<unknown | null>
+      deleteReplaySession: (id: string) => Promise<{ ok: boolean; error?: string }>
       platform: string
     }
   }

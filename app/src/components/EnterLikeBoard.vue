@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Splitpanes, Pane } from 'splitpanes'
 import type { SplitpanesResizedPayload } from 'splitpanes'
 import type { LiveEvent } from '../types'
@@ -66,6 +66,10 @@ async function stick(el: HTMLElement | null) {
   if (!el) return
   el.scrollTop = el.scrollHeight
 }
+
+onMounted(() => {
+  void stick(enterRef.value)
+})
 
 watch(
   () => props.enters.length,

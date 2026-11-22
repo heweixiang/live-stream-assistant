@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { FiredAction } from '../types'
 import FontGear from './FontGear.vue'
 import { usePanelFonts } from '../composables/usePanelFonts'
@@ -34,6 +34,16 @@ function flash(id: string) {
   )
 }
 
+async function scrollToBottom() {
+  await nextTick()
+  const el = listRef.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+onMounted(() => {
+  void scrollToBottom()
+})
+
 watch(
   () => props.actions.map((a) => a.id).join(','),
   (ids, prev) => {
@@ -44,10 +54,7 @@ watch(
     for (const a of props.actions) {
       if (!prevSet.has(a.id)) flash(a.id)
     }
-    void nextTick(() => {
-      const el = listRef.value
-      if (el) el.scrollTop = el.scrollHeight
-    })
+    void scrollToBottom()
   },
 )
 
